@@ -1,0 +1,9 @@
+# office-R Web 使用 pnpm 工作区管理。当前仅 web 一个包,
+# 预留 packages/* 以便未来拆分共享前端库。
+packages:
+  - "web"
+  - "packages/*"
+
+# 允许执行构建脚本的依赖(pnpm 默认阻止 postinstall 脚本)
+onlyBuiltDependencies:
+  - esbuild

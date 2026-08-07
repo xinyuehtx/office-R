@@ -1,0 +1,17 @@
+[package]
+name = "office-wasm"
+description = "office-core 的 wasm-bindgen 绑定层,供 Web 视图层调用"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+office-core = { workspace = true }
+wasm-bindgen = "0.2"
+serde = { workspace = true }
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1"

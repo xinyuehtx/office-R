@@ -1,0 +1,10 @@
+[package]
+name = "office-core"
+description = "office-R 平台无关的计算内核:office 文件识别与(占位)渲染"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }

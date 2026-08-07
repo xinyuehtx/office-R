@@ -1,0 +1,34 @@
+# ---------- Rust ----------
+/target
+**/*.rs.bk
+*.pdb
+
+# ---------- WASM 构建产物(由 wasm-pack 生成,不入库) ----------
+/web/src/wasm/pkg/
+
+# ---------- Node / pnpm ----------
+node_modules/
+# 本项目 Web 使用 pnpm;仅保留 pnpm-lock.yaml,忽略其它包管理器的锁文件
+package-lock.json
+yarn.lock
+npm-debug.log*
+pnpm-debug.log*
+
+# ---------- Vite / 前端构建产物 ----------
+/web/dist/
+*.local
+.vite/
+
+# ---------- 测试 / 覆盖率 ----------
+coverage/
+*.lcov
+
+# ---------- 编辑器 / 系统 ----------
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# ---------- 工具临时产物 ----------
+.playwright-mcp/
