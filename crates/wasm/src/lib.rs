@@ -6,9 +6,11 @@
 
 mod csv_sheet;
 mod log;
+mod word;
 
 pub use csv_sheet::{parse_csv_packed, CellWindow, PackedCsv, WasmSheet};
 pub use log::set_log_level;
+pub use word::WasmWordDoc;
 
 use wasm_bindgen::prelude::*;
 

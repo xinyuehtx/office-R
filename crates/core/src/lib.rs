@@ -19,6 +19,7 @@
 //! 而不是把这些概念混进表格模型。详见 `docs/architecture.md`。
 
 pub mod csv;
+pub mod docx;
 pub mod excel;
 pub mod filter;
 pub mod format;

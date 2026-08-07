@@ -488,3 +488,31 @@
 .sheet__status-spacer {
   flex: 1;
 }
+
+/* ---------- 文档(Word)页 ---------- */
+.word-viewport {
+  /* 固定高度的滚动容器:内部 spacer 撑高度,canvas sticky 只画可见切片 */
+  height: calc(100vh - 320px);
+  min-height: 360px;
+  overflow-y: auto;
+  overflow-x: auto;
+  background: #f6f8fa;
+  border: 1px solid #d0d7de;
+  border-radius: 8px;
+}
+
+/* spacer:宽度即一页纸,高度为内容总高,居中,驱动滚动条 */
+.word-scroll {
+  width: 820px;
+  margin: 0 auto;
+  position: relative;
+}
+
+/* canvas 贴在滚动容器顶部,尺寸为可见区域,随滚动重绘切片 */
+.word-canvas {
+  position: sticky;
+  top: 0;
+  display: block;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
