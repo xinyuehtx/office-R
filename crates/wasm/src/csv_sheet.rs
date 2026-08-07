@@ -19,8 +19,10 @@
 //! 表格内容**不会**以 JS 字符串数组的形式整体存在。
 
 use office_core::csv::{CsvMeta, CsvOptions};
+use office_core::filter::{ColumnFilter, NumOp, Predicate, TextOp};
 use office_core::sheet::PackedSheet;
 use office_core::Sheet;
+use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
 use crate::log::{self, Level};
@@ -143,6 +145,11 @@ impl CellWindow {
 #[wasm_bindgen]
 pub struct WasmSheet {
     sheet: Sheet,
+    /// 过滤后的「可视行 → 底层行」映射;`None` 表示未过滤(可视行即底层行)。
+    ///
+    /// 关键点:可视行始终是连续的 `0..len`,渲染器的几何(等高行、列前缀和)因此
+    /// **完全复用**,过滤对渲染器透明 —— 只是行头标签要显示底层行号(见 `rowLabel`)。
+    row_map: Option<Vec<u32>>,
 }
 
 #[wasm_bindgen]
@@ -164,14 +171,20 @@ impl WasmSheet {
             col_width_units,
         };
         Sheet::from_packed(packed)
-            .map(|sheet| WasmSheet { sheet })
+            .map(|sheet| WasmSheet {
+                sheet,
+                row_map: None,
+            })
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
-    /// 行数。
+    /// 行数(过滤后为可视行数)。
     #[wasm_bindgen(getter)]
     pub fn rows(&self) -> u32 {
-        self.sheet.rows() as u32
+        match &self.row_map {
+            Some(map) => map.len() as u32,
+            None => self.sheet.rows() as u32,
+        }
     }
 
     /// 列数。
@@ -187,16 +200,142 @@ impl WasmSheet {
     }
 
     /// 取 `[row0, row1) × [col0, col1)` 区域的单元格文本。越界入参会被夹紧。
+    ///
+    /// 有过滤时,可视行区间会先经 `row_map` 映射到(可能不连续的)底层行再取数。
     pub fn window(&self, row0: u32, row1: u32, col0: u32, col1: u32) -> CellWindow {
-        let w = self
-            .sheet
-            .window(row0 as usize, row1 as usize, col0 as usize, col1 as usize);
+        let w = match &self.row_map {
+            Some(map) => {
+                let r0 = (row0 as usize).min(map.len());
+                let r1 = (row1 as usize).clamp(r0, map.len());
+                let underlying: Vec<usize> = map[r0..r1].iter().map(|&r| r as usize).collect();
+                self.sheet
+                    .window_rows(&underlying, col0 as usize, col1 as usize)
+            }
+            None => self
+                .sheet
+                .window(row0 as usize, row1 as usize, col0 as usize, col1 as usize),
+        };
         CellWindow {
             text: w.text,
             ends: w.ends,
             rows: w.rows as u32,
             cols: w.cols as u32,
         }
+    }
+
+    /// 可视行对应的**底层行号**(0 基);行头据此显示原始行号。未过滤时即入参。
+    #[wasm_bindgen(js_name = rowLabel)]
+    pub fn row_label(&self, visual: u32) -> u32 {
+        match &self.row_map {
+            Some(map) => map.get(visual as usize).copied().unwrap_or(visual),
+            None => visual,
+        }
+    }
+
+    /// 应用列过滤:在内核侧全表扫描算出命中行,存为行映射,返回可视行数。
+    ///
+    /// `specs` 是紧凑 JSON(见 RFC-0005),`header_rows` 是顶部始终保留的行数。
+    pub fn filter(&mut self, specs: JsValue, header_rows: u32) -> Result<u32, JsValue> {
+        let dtos: Vec<FilterSpec> =
+            serde_wasm_bindgen::from_value(specs).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let mut filters = Vec::with_capacity(dtos.len());
+        for d in dtos {
+            filters.push(d.into_core()?);
+        }
+        let rows = office_core::filter::filter_rows(&self.sheet, &filters, header_rows);
+        let count = rows.len() as u32;
+        self.row_map = Some(rows);
+        Ok(count)
+    }
+
+    /// 清除过滤,恢复全量。
+    #[wasm_bindgen(js_name = clearFilter)]
+    pub fn clear_filter(&mut self) {
+        self.row_map = None;
+    }
+
+    /// 枚举某列的唯一值(供值集过滤 UI),跳过顶部 `header_rows` 行,最多 `limit` 个。
+    /// 返回 `{ values: string[], truncated: boolean }`。
+    #[wasm_bindgen(js_name = uniqueValues)]
+    pub fn unique_values(
+        &self,
+        col: u32,
+        header_rows: u32,
+        limit: u32,
+    ) -> Result<JsValue, JsValue> {
+        let (values, truncated) = office_core::filter::column_unique_values(
+            &self.sheet,
+            col,
+            header_rows,
+            limit as usize,
+        );
+        let obj = js_sys::Object::new();
+        let arr = js_sys::Array::new();
+        for v in values {
+            arr.push(&JsValue::from_str(&v));
+        }
+        js_sys::Reflect::set(&obj, &"values".into(), &arr)?;
+        js_sys::Reflect::set(&obj, &"truncated".into(), &JsValue::from_bool(truncated))?;
+        Ok(obj.into())
+    }
+}
+
+/// 前端传入的单列过滤规格(紧凑 JSON,经 serde 反序列化)。
+#[derive(Deserialize)]
+struct FilterSpec {
+    col: u32,
+    /// `"values" | "text" | "number" | "blank"`
+    kind: String,
+    #[serde(default)]
+    op: String,
+    #[serde(default)]
+    needle: String,
+    #[serde(default)]
+    a: f64,
+    #[serde(default)]
+    b: f64,
+    #[serde(default)]
+    values: Vec<String>,
+    #[serde(default)]
+    blank: bool,
+}
+
+impl FilterSpec {
+    fn into_core(self) -> Result<ColumnFilter, JsValue> {
+        let predicate = match self.kind.as_str() {
+            "values" => Predicate::Values(self.values),
+            "blank" => Predicate::Blank(self.blank),
+            "text" => Predicate::Text {
+                op: match self.op.as_str() {
+                    "contains" => TextOp::Contains,
+                    "notContains" => TextOp::NotContains,
+                    "equals" => TextOp::Equals,
+                    "begins" => TextOp::Begins,
+                    "ends" => TextOp::Ends,
+                    other => return Err(JsValue::from_str(&format!("未知文本运算:{other}"))),
+                },
+                needle: self.needle,
+            },
+            "number" => Predicate::Number {
+                op: match self.op.as_str() {
+                    "eq" => NumOp::Eq,
+                    "ne" => NumOp::Ne,
+                    "gt" => NumOp::Gt,
+                    "ge" => NumOp::Ge,
+                    "lt" => NumOp::Lt,
+                    "le" => NumOp::Le,
+                    "between" => NumOp::Between,
+                    other => return Err(JsValue::from_str(&format!("未知数值运算:{other}"))),
+                },
+                a: self.a,
+                b: self.b,
+            },
+            other => return Err(JsValue::from_str(&format!("未知过滤类型:{other}"))),
+        };
+        Ok(ColumnFilter {
+            col: self.col,
+            predicate,
+        })
     }
 }
 

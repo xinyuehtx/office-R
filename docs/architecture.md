@@ -41,6 +41,7 @@ office-R 是一个**统一的 Office 三件套应用**(文档 / 表格 / 演示)
 │  │              · error(thiserror)· mod(解析主流程)         │
 │  ├─ formula/    公式引擎:token→parser→ast→eval + functions/    │
 │  │              值层 Workbook,对齐 Excel(140+ 函数)          │
+│  ├─ filter.rs   列过滤:按列条件全表扫描 → 命中行下标            │
 │  ├─ render.rs   RenderResult 摘要结构                           │
 │  ├─ word.rs · excel.rs · ppt.rs   docx / xlsx / pptx 摘要解析   │
 │  └─ lib.rs      render() 统一分发入口                            │
@@ -92,7 +93,17 @@ CSV 走下面的表格渲染路径;若把 CSV 传到 Word/演示页,会得到「
 ④ 主线程装配          WasmSheet.fromPacked → 表格常驻 WASM 线性内存
 ⑤ 绘制                GridRenderer 每帧只取「可见矩形」的单元格并绘制
                       公式栏用 SheetHandle.formula(r,c) 回显选中格的原始公式
+⑥ 过滤(可选)        WasmSheet.filter 在内核侧扫描 → 存「可视行→底层行」映射;
+                      可视行连续 0..V,渲染几何复用,行头经 rowLabel 显示原始行号
 ```
+
+### 列过滤(视图层,见 [RFC-0005](./rfcs/0005-view-filter-freeze.md))
+
+重扫描在 `crates/core/src/filter.rs`(文本/数值/值集/空白,多列 AND)。关键设计:`WasmSheet`
+内部持「可视行 → 底层行」映射,`rows()`/`window()` 据此重映射,**可视行始终连续 `0..V`**,
+所以渲染器的几何(等高行、列前缀和)**完全复用**,过滤对渲染器透明 —— 只有行头标签改为经
+`rowLabel` 显示原始行号。前端 `FilterBar` 收集条件,`renderer.refreshRows()` 保留滚动/缩放刷新。
+**冻结行列**在渲染器几何层做四象限独立偏移(计划中)。
 
 **为什么分两段**:解析必须离开主线程(否则大文件冻住 UI),而绘制取数必须同步
 (否则掉帧)。两段之间只有「移出 wasm 堆」和「移入 wasm 堆」两次必要拷贝,

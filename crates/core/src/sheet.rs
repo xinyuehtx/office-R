@@ -195,6 +195,34 @@ impl Sheet {
         }
     }
 
+    /// 取出**指定行**(按给定顺序)、`[col0, col1)` 列的单元格文本。
+    ///
+    /// 与 [`Self::window`] 的区别:行不必连续、可任意顺序 —— 这正是**过滤**(乃至将来排序)
+    /// 所需的「可视行 → 底层行」重映射:传入映射后的底层行序列即可。列区间会被夹紧。
+    pub fn window_rows(&self, rows: &[usize], col0: usize, col1: usize) -> CellWindow {
+        let col0 = col0.min(self.cols);
+        let col1 = col1.clamp(col0, self.cols);
+        let cols = col1 - col0;
+        let mut text = String::new();
+        let mut ends = Vec::with_capacity(rows.len() * cols);
+        // 偏移按 UTF-16 码元累加(与 window 一致,见 CellWindow::ends 说明)
+        let mut utf16_len: u32 = 0;
+        for &row in rows {
+            for col in col0..col1 {
+                let cell = self.cell(row, col);
+                text.push_str(cell);
+                utf16_len += cell.encode_utf16().count() as u32;
+                ends.push(utf16_len);
+            }
+        }
+        CellWindow {
+            text,
+            ends,
+            rows: rows.len(),
+            cols,
+        }
+    }
+
     /// 转成可跨线程传输的紧凑表示(移动语义,无深拷贝)。
     pub fn into_packed(self) -> PackedSheet {
         PackedSheet {

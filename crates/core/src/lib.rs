@@ -20,6 +20,7 @@
 
 pub mod csv;
 pub mod excel;
+pub mod filter;
 pub mod format;
 pub mod formula;
 pub mod ppt;
@@ -28,6 +29,7 @@ pub mod sheet;
 pub mod word;
 
 pub use csv::{CsvDocument, CsvError, CsvMeta, CsvOptions};
+pub use filter::{filter_rows, ColumnFilter, NumOp, Predicate, TextOp};
 pub use format::{detect_format, Format};
 pub use formula::{Value as FormulaValue, Workbook};
 pub use render::RenderResult;

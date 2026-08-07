@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Tracer } from "../shared/logger";
-import type { SheetHandle } from "../shared/sheet";
+import type { FilterSpec, SheetHandle } from "../shared/sheet";
 import { GridRenderer, type RendererStats } from "./grid/renderer";
 import { wheelToScrollDelta, wheelToZoomFactor } from "./grid/input";
 import { cellAddress } from "./grid/labels";
 import { MAX_ZOOM, MIN_ZOOM } from "./grid/theme";
 import { rectContains } from "./grid/geometry";
+import { FilterBar } from "./FilterBar";
 
 /** 一行 / 一列的滚轮步进(deltaMode = LINE 时用)。 */
 const LINE_HEIGHT = 24;
 /** 按下后移动超过这个距离才算「拖拽」,否则算「点击」。 */
 const DRAG_THRESHOLD = 3;
+/** 顶部作为表头、过滤时始终保留的行数(CSV 常以首行为表头)。 */
+const HEADER_ROWS = 1;
 
 interface SheetCanvasProps {
   /** 表格数据。 */
@@ -44,8 +47,12 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
   const [selection, setSelection] = useState({ row: 0, col: 0 });
   const [zoom, setZoom] = useState(1);
   const [stats, setStats] = useState<RendererStats | null>(null);
+  const [filters, setFilters] = useState<Map<number, FilterSpec>>(new Map());
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
+
+  /** 该数据源是否支持过滤(WASM 句柄支持,测试替身可能不支持)。 */
+  const canFilter = typeof sheet.filter === "function";
 
   /** 选中单元格的文本,用于状态栏与无障碍播报。 */
   const selectedText = useMemo(() => {
@@ -101,15 +108,28 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
     };
   }, [tracer]);
 
-  // 换数据:重置视图状态
+  // 换数据:重置视图状态与过滤
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) return;
     renderer.setSheet(sheet);
     setSelection({ row: 0, col: 0 });
+    setFilters(new Map());
     setZoom(renderer.getZoom());
     renderer.requestFrame();
   }, [sheet]);
+
+  // 过滤变化:在 WASM 侧重算命中行,再让渲染器按新行集刷新(保留滚动/缩放)
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer || !canFilter) return;
+    const specs = [...filters.values()];
+    if (specs.length === 0) sheet.clearFilter?.();
+    else sheet.filter?.(specs, HEADER_ROWS);
+    renderer.refreshRows();
+    setSelection((prev) => ({ row: 0, col: Math.min(prev.col, Math.max(0, sheet.cols - 1)) }));
+    renderer.requestFrame();
+  }, [filters, sheet, canFilter]);
 
   // 选区变化同步给渲染器
   useEffect(() => {
@@ -350,11 +370,33 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
     }
   };
 
+  const setColumnFilter = useCallback((col: number, spec: FilterSpec | null) => {
+    setFilters((prev) => {
+      const next = new Map(prev);
+      if (spec) next.set(col, spec);
+      else next.delete(col);
+      return next;
+    });
+  }, []);
+
+  const clearAllFilters = useCallback(() => setFilters(new Map()), []);
+
   const address = cellAddress(selection.row, selection.col);
   const fps = stats && stats.avgFrameMs > 0 ? Math.min(60, Math.round(1000 / stats.avgFrameMs)) : null;
 
   return (
     <div className="sheet">
+      {canFilter && (
+        <FilterBar
+          sheet={sheet}
+          activeCol={selection.col}
+          filters={filters}
+          headerRows={HEADER_ROWS}
+          onApply={setColumnFilter}
+          onClearAll={clearAllFilters}
+        />
+      )}
+
       {/* 公式栏:左侧显示当前地址,右侧显示原始公式(公式格)或计算值 */}
       <div className="sheet__formula-bar" data-testid="formula-bar">
         <span className="sheet__formula-address">{address}</span>

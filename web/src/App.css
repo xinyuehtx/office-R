@@ -222,6 +222,98 @@
 }
 
 /*
+ * 过滤条:作用于当前选中列;生效的过滤以标签列出,可单独/整体清除。
+ */
+.sheet__filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-bottom: 1px solid #d0d7de;
+  background: #fbfcfe;
+  font-size: 12px;
+  color: #57606a;
+}
+
+.sheet__filter-title {
+  font-weight: 600;
+  color: #24292f;
+}
+
+.sheet__filter-bar select,
+.sheet__filter-bar input[type="text"],
+.sheet__filter-bar input:not([type]) {
+  font-size: 12px;
+  padding: 2px 6px;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.sheet__filter-bar input {
+  width: 8rem;
+}
+
+.sheet__filter-bar button {
+  font-size: 12px;
+  padding: 2px 10px;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.sheet__filter-bar button:hover {
+  background: #f3f4f6;
+}
+
+.sheet__filter-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 100%;
+  max-height: 96px;
+  overflow: auto;
+  padding: 4px 6px;
+  border: 1px solid #e2e5e9;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.sheet__filter-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.sheet__filter-hint {
+  color: #8c959f;
+}
+
+.sheet__filter-active {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.sheet__filter-chip {
+  background: #ddf4ff !important;
+  border-color: #b6e3ff !important;
+  color: #0969da;
+}
+
+.sheet__filter-link {
+  border: none !important;
+  background: none !important;
+  color: #0969da;
+  text-decoration: underline;
+  padding: 2px 4px !important;
+}
+
+/*
  * 公式栏:仿 Excel,左侧当前地址,右侧原始公式 / 计算值。
  * 放在表格视口之上,占一行固定高度。
  */

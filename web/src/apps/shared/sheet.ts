@@ -52,9 +52,35 @@ export interface CellFormula {
   formula: string;
 }
 
+/** 单列过滤规格(与 WASM `FilterSpec` 的紧凑 JSON 对应)。 */
+export interface FilterSpec {
+  /** 0 基列号。 */
+  col: number;
+  /** 过滤类型。 */
+  kind: "values" | "text" | "number" | "blank";
+  /** 运算符:text = contains/notContains/equals/begins/ends;number = eq/ne/gt/ge/lt/le/between。 */
+  op?: string;
+  /** text 的关键字。 */
+  needle?: string;
+  /** number 的操作数(between 用 a、b)。 */
+  a?: number;
+  b?: number;
+  /** values 的值集。 */
+  values?: string[];
+  /** blank:true 只留空白,false 只留非空白。 */
+  blank?: boolean;
+}
+
+/** 列唯一值枚举结果。 */
+export interface UniqueValues {
+  values: string[];
+  /** 是否因超过上限被截断(还有更多未列出)。 */
+  truncated: boolean;
+}
+
 /** 只读表格句柄。 */
 export interface SheetHandle {
-  /** 行数。 */
+  /** 行数(过滤后为可视行数)。 */
   readonly rows: number;
   /** 列数。 */
   readonly cols: number;
@@ -71,6 +97,17 @@ export interface SheetHandle {
   formula?(row: number, col: number): string | null;
   /** 公式单元格总数(无公式为 0);用于页面提示。 */
   readonly formulaCount?: number;
+  /**
+   * 可视行 → **底层行号**(0 基)。过滤后可视行是紧凑 `0..V`,行头据此显示原始行号。
+   * 未过滤或不支持时可省略(视为恒等)。
+   */
+  rowLabel?(visualRow: number): number;
+  /** 应用列过滤(多列 AND),返回可视行数;`headerRows` 为顶部始终保留的行数。 */
+  filter?(specs: FilterSpec[], headerRows: number): number;
+  /** 清除过滤,恢复全量。 */
+  clearFilter?(): void;
+  /** 枚举某列唯一值(供值集过滤 UI)。 */
+  uniqueValues?(col: number, headerRows: number, limit: number): UniqueValues;
   /** 释放底层资源(WASM 线性内存里的表格)。 */
   dispose(): void;
 }

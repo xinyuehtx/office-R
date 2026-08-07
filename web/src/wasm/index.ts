@@ -10,7 +10,14 @@ import init, {
   WasmSheet,
 } from "./pkg/office_wasm.js";
 import { getLogLevel, onLogLevelChange } from "../apps/shared/logger";
-import type { CellFormula, CellWindowData, SheetHandle, SheetMeta } from "../apps/shared/sheet";
+import type {
+  CellFormula,
+  CellWindowData,
+  FilterSpec,
+  SheetHandle,
+  SheetMeta,
+  UniqueValues,
+} from "../apps/shared/sheet";
 
 /** 识别出的格式,与 Rust 端 `Format` 对应。 */
 export type OfficeFormat = "docx" | "xlsx" | "pptx" | "csv" | "unknown";
@@ -138,9 +145,15 @@ export async function sheetFromPacked(packed: PackedSheetTransfer): Promise<Shee
     formulaMap.set(`${f.row},${f.col}`, f.formula);
   }
 
+  // 注意:rows/cols 用 getter 实时读取 —— 过滤会改变可视行数,
+  // 渲染器 refreshRows() 时要拿到最新值。
   return {
-    rows: inner.rows,
-    cols: inner.cols,
+    get rows() {
+      return inner.rows;
+    },
+    get cols() {
+      return inner.cols;
+    },
     colWidthUnits: inner.colWidthUnits(),
     formulaCount: formulaMap.size,
     window(row0: number, row1: number, col0: number, col1: number): CellWindowData {
@@ -156,6 +169,18 @@ export async function sheetFromPacked(packed: PackedSheetTransfer): Promise<Shee
     },
     formula(row: number, col: number): string | null {
       return formulaMap.get(`${row},${col}`) ?? null;
+    },
+    rowLabel(visualRow: number): number {
+      return inner.rowLabel(visualRow);
+    },
+    filter(specs: FilterSpec[], headerRows: number): number {
+      return inner.filter(specs, headerRows);
+    },
+    clearFilter(): void {
+      inner.clearFilter();
+    },
+    uniqueValues(col: number, headerRows: number, limit: number): UniqueValues {
+      return inner.uniqueValues(col, headerRows, limit) as UniqueValues;
     },
     dispose() {
       inner.free();

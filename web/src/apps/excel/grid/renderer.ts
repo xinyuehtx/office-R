@@ -213,6 +213,8 @@ export class GridRenderer {
   private scratch: Layer | null = null;
 
   private sheet: SheetHandle | null = null;
+  /** 可视行 → 行头显示文本;过滤时映射到原始行号,否则即 `可视行 + 1`。 */
+  private rowLabelText: (visualRow: number) => string = (r) => String(r + 1);
   private layout: GridLayout = computeLayout({ rows: 0, cols: 0, colWidthUnits: [], zoom: 1 });
 
   /** 设备像素比。 */
@@ -321,6 +323,11 @@ export class GridRenderer {
   /** 换一份表格数据。传 `null` 表示清空。 */
   setSheet(sheet: SheetHandle | null): void {
     this.sheet = sheet;
+    // 行头标签:过滤后可视行是紧凑 0..V,但要显示原始行号
+    this.rowLabelText =
+      sheet && sheet.rowLabel
+        ? (r) => String((sheet.rowLabel as (v: number) => number)(r) + 1)
+        : (r) => String(r + 1);
     this.scroll = { x: 0, y: 0 };
     this.selection = sheet && sheet.rows > 0 ? { row: 0, col: 0 } : null;
     this.hover = null;
@@ -329,6 +336,28 @@ export class GridRenderer {
     this.sheetSetAt = this.now();
     this.stats.firstFrameMs = null;
     this.invalidateLayout();
+  }
+
+  /**
+   * 数据行集合变化(如应用/清除过滤)后刷新:重读行数、清缓存重画,
+   * 但**保留滚动与缩放**(比 setSheet 更轻,不重置视图)。
+   */
+  refreshRows(): void {
+    this.selection = this.sheet && this.sheet.rows > 0 ? this.clampSelection() : null;
+    this.windowCache = null;
+    this.tile = null;
+    this.invalidateLayout();
+  }
+
+  /** 把当前选区夹回有效范围(行数变化后用)。 */
+  private clampSelection(): CellRef {
+    const rows = this.sheet?.rows ?? 0;
+    const cols = this.sheet?.cols ?? 0;
+    const cur = this.selection ?? { row: 0, col: 0 };
+    return {
+      row: Math.min(Math.max(0, cur.row), Math.max(0, rows - 1)),
+      col: Math.min(Math.max(0, cur.col), Math.max(0, cols - 1)),
+    };
   }
 
   /**
@@ -673,6 +702,7 @@ export class GridRenderer {
           range,
           active: this.selection,
           fitter: this.fitter,
+          rowLabelText: this.rowLabelText,
         });
         this.stats.layerPaints.headers += 1;
       }

@@ -24,6 +24,8 @@
   (SUM/IF/VLOOKUP/DATE/PMT…),对齐运算符优先级、错误值(`#DIV/0!`)、类型强制与循环检测;
   网格显示计算值,选中后公式栏回显原始公式。点页面上的「加载公式示例」即可体验
   ([RFC-0004](./docs/rfcs/0004-formula-engine.md))
+- **列过滤**:按列条件筛选行(文本 / 数值 / 值集 / 空白,多列 AND),重扫描在 Rust/WASM 侧;
+  过滤后行头仍显示原始行号(冻结行列开发中,见 [RFC-0005](./docs/rfcs/0005-view-filter-freeze.md))
 
 本期**不含**数字/日期格式化、图表、单元格编辑与动态数组溢出 —— 详见
 [RFC-0003](./docs/rfcs/0003-csv-canvas-grid.md) 与 [RFC-0004](./docs/rfcs/0004-formula-engine.md) 的范围说明。
