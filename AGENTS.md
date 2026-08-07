@@ -11,7 +11,7 @@ office-R 是一个**统一的 Office 三件套应用**(文档 Word / 表格 Exce
 - **计算内核 = Rust**:编译为 **WASM**,在浏览器内识别与(未来)解析 office 文件。
 - **部署**:纯静态产物 → **GitHub Pages**,无需服务器。
 
-当前处于**骨架阶段**:三个页面各具上传入口,打通「上传 → 识别格式 → 占位渲染」全链路,尚未做真实 OOXML 解析。
+当前实现**最小真实解析**:xlsx(calamine)、docx(docx-rs)、pptx(zip + quick-xml),三页面各具上传入口,打通「上传 → 识别 → 解析摘要」全链路。解析失败优雅降级。
 
 ## 架构
 
@@ -24,6 +24,10 @@ web/ (React 视图)  ──wasm-bindgen──▶  crates/wasm (绑定)  ──�
 - `crates/core`(`office-core`):平台无关,可原生单测。
 - `crates/wasm`(`office-wasm`):wasm-bindgen 绑定层,薄。
 - `web/`:视图层,`src/apps/{word,excel,ppt}` 三页面 + `src/apps/shared` 复用组件。
+
+**核心依赖**(选型理由见 [docs/rfcs/0002-core-dependencies.md](./docs/rfcs/0002-core-dependencies.md)):
+`calamine`(xlsx)、`docx-rs`(docx)、`zip`(仅 `deflate`)+ `quick-xml`(pptx)、`thiserror`。
+**不引入 tokio**:浏览器 wasm 下 tokio 基本不可用,office 解析为同步 CPU 密集型。
 
 ## 目录结构
 

@@ -22,10 +22,10 @@ pub fn version() -> &'static str {
 /// 这是「读取 office 文件 → 识别 → 渲染」的统一入口。
 pub fn render(bytes: &[u8]) -> RenderResult {
     match detect_format(bytes) {
-        Format::Docx => word::render_placeholder(bytes),
-        Format::Xlsx => excel::render_placeholder(bytes),
-        Format::Pptx => ppt::render_placeholder(bytes),
-        Format::Unknown => RenderResult::placeholder(
+        Format::Docx => word::render(bytes),
+        Format::Xlsx => excel::render(bytes),
+        Format::Pptx => ppt::render(bytes),
+        Format::Unknown => RenderResult::err(
             Format::Unknown,
             bytes.len(),
             "无法识别的文件格式,请上传 .docx / .xlsx / .pptx 文件。",

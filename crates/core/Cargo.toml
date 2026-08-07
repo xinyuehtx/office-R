@@ -1,10 +1,15 @@
 [package]
 name = "office-core"
-description = "office-R 平台无关的计算内核:office 文件识别与(占位)渲染"
+description = "office-R 平台无关的计算内核:office 文件识别与解析"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
+calamine = "0.36.1"
+docx-rs = "0.4.22"
+quick-xml = "0.41.0"
 serde = { workspace = true }
+thiserror = "2.0.19"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

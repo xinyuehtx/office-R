@@ -16,6 +16,8 @@ export interface RenderResult {
   format_name: string;
   byte_len: number;
   message: string;
+  /** 是否解析成功;false 时 message 为失败原因。 */
+  ok: boolean;
 }
 
 let initialized: Promise<unknown> | null = null;

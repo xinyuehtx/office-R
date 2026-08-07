@@ -34,14 +34,19 @@ export function OfficePage({ title, subtitle, accept }: OfficePageProps) {
         {state.loading && <p>正在解析…</p>}
         {state.error && <p className="office-page__error">解析失败:{state.error}</p>}
         {state.result && (
-          <dl className="office-page__meta">
-            <dt>识别格式</dt>
-            <dd>{state.result.format_name}</dd>
-            <dt>文件大小</dt>
-            <dd>{state.result.byte_len} 字节</dd>
-            <dt>说明</dt>
-            <dd>{state.result.message}</dd>
-          </dl>
+          <>
+            <dl className="office-page__meta">
+              <dt>识别格式</dt>
+              <dd>{state.result.format_name}</dd>
+              <dt>文件大小</dt>
+              <dd>{state.result.byte_len} 字节</dd>
+              <dt>解析状态</dt>
+              <dd>{state.result.ok ? "成功" : "失败"}</dd>
+            </dl>
+            <p className={state.result.ok ? "office-page__summary" : "office-page__error"}>
+              {state.result.message}
+            </p>
+          </>
         )}
         {!state.loading && !state.error && !state.result && (
           <p className="office-page__empty">尚未选择文件。请上传一个 {accept} 文件以查看识别结果。</p>

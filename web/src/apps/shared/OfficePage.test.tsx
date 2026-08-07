@@ -27,6 +27,7 @@ describe("OfficePage 上传与渲染", () => {
       format_name: "Word 文档",
       byte_len: 1234,
       message: "占位说明",
+      ok: true,
     });
 
     const user = userEvent.setup();
