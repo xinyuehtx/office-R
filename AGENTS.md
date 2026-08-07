@@ -14,7 +14,7 @@ office-R 是一个**统一的 Office 三件套应用**(文档 Word / 表格 Exce
 当前能力:
 
 - **表格页(本期重点)**:上传 **CSV** → WASM 解析(编码探测 / 分隔符嗅探 / 列切分)→ **canvas 表格视图**,支持滚动、缩放、键盘与拖拽。视图由**三张堆叠的 canvas** 组成(单元格 / 表头 / 覆盖层),叠加交给浏览器合成器用 GPU 完成;单元格层是超出视口一圈的瓦片,多数滚动帧只改 CSS transform、主线程零绘制。50 万行流畅浏览。见 [RFC-0003](./docs/rfcs/0003-csv-canvas-grid.md)。
-- **公式计算引擎(Rust 侧)**:以 `=` 开头的单元格按 **Excel 语义**求值(词法 → 语法 → 求值 + 值层 `Workbook`),对齐 Excel 的运算符优先级、错误值(`#DIV/0!` 等)、类型强制与循环检测,内置 **140+ 函数**(math/stats/logical/text/date/lookup/info/financial)。表格页显示计算值、公式栏回显原始公式。参考 HyperFormula / Univer 的函数目录,Rust 自研。见 [RFC-0004](./docs/rfcs/0004-formula-engine.md)。
+- **公式计算引擎(Rust 侧)**:以 `=` 开头的单元格按 **Excel 语义**求值(词法 → 语法 → 求值 + 值层 `Workbook`),对齐 Excel 的运算符优先级、错误值(`#DIV/0!` 等)、类型强制与循环检测,内置 **140+ 函数**(math/stats/logical/text/date/lookup/info/financial)。之上是**计算管线**:依赖图(前驱/后继)+ 脏区跟踪 + 拓扑序增量重算(计算合并)+ 循环更新策略(默认 `#REF!`,可开启 Jacobi 迭代计算)。表格页显示计算值、公式栏回显原始公式。参考 HyperFormula / Univer 的函数目录,Rust 自研。见 [RFC-0004](./docs/rfcs/0004-formula-engine.md)。
 - **文档 / 演示页**:最小真实解析,打通「上传 → 识别 → 解析摘要」全链路。xlsx(calamine)、docx(docx-rs)、pptx(zip + quick-xml)。
 
 解析失败优雅降级:错误类型清晰(`thiserror`)、提示中文可操作、可重新选择文件重试。

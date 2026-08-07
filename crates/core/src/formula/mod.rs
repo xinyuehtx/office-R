@@ -34,10 +34,12 @@ pub mod value;
 mod ast;
 mod eval;
 mod functions;
+mod graph;
 mod parser;
 mod token;
 
-pub use eval::Workbook;
+pub use eval::{RecalcReport, Workbook};
+pub use graph::{Cell, Precedents};
 pub use reference::{col_to_index, index_to_col, CellRef, RangeRef};
 pub use value::{Array, ExcelError, Value};
 
@@ -116,7 +118,8 @@ pub fn evaluate_sheet(sheet: &crate::sheet::Sheet, now_serial: f64) -> Option<Ev
             }
         }
     }
-    let values = wb.evaluate_all();
+    // 走**计算管线**:按依赖拓扑序增量重算(每格只算一次),循环引用得 #REF!。
+    wb.recalculate();
 
     // 生成显示表:公式格取计算值,其余格保留原文;行列形状与原表一致。
     let mut builder = crate::sheet::Sheet::builder();
@@ -131,11 +134,7 @@ pub fn evaluate_sheet(sheet: &crate::sheet::Sheet, now_serial: f64) -> Option<Ev
                     col: c as u32,
                     source: raw.to_string(),
                 });
-                let display = match values.get(&(r as u32, c as u32)) {
-                    Some(v) => value_to_display(v),
-                    None => String::new(), // 计算成空(如 =""),显示空
-                };
-                builder.push_field(&display);
+                builder.push_field(&value_to_display(&wb.computed_value(r as u32, c as u32)));
             } else {
                 builder.push_field(raw);
             }

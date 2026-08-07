@@ -199,8 +199,15 @@ DOM 只承载:容器、交互层、状态栏,以及供读屏软件播报当前�
   parser.rs  语法:Pratt 优先级爬升(: > 一元 - > % > ^ > * / > + - > & > 比较)→ AST
   eval.rs    求值:错误传播 + 类型强制 + 范围展开;Workbook 值层承载字面量/公式,
              按需求值 + 记忆化缓存 + 循环检测(环 → #REF!,不 panic/不死循环)
+  graph.rs   依赖图:前驱提取 + 范围包含判定 + 拓扑排序(Kahn)
   functions/ 可扩展注册表:math/stats/logical/text/datetime/lookup/info/financial(140+)
 ```
+
+**计算管线**(编辑后不全表重算):`set_input` 只更新受影响的依赖图边,并把「该格 + 传递后继」
+标记为**脏区**;`recalculate()` 对脏区子图拓扑排序(前驱在前),喂入干净值后按序求值,
+每个脏格**只算一次**(计算合并)。环(循环引用)默认得 `#REF!`,或 `set_iterative` 开启
+**Jacobi 迭代**至收敛(`epsilon`)/上限(`max_iter`)。`precedents/dependents/dirty_cells`
+暴露依赖路径与脏区供审查。范围不展开成边,只在脏区上按包含判定,避免大范围爆炸。
 
 **关键取舍**:
 

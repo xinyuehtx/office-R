@@ -21,7 +21,8 @@
 | `crates/core/src/formula/value.rs` | `Value`/`ExcelError`、类型强制、General 数字格式化 |
 | `.../reference.rs` | A1 引用、列字母↔下标、范围、绝对/相对 |
 | `.../token.rs` `ast.rs` `parser.rs` | 词法器、AST、Pratt 优先级解析器 |
-| `.../eval.rs` | 求值器 + 值层 `Workbook`(按需求值 / 记忆化 / 循环检测) |
+| `.../eval.rs` | 求值器 + 值层 `Workbook`(按需求值 / 记忆化 / 循环检测)+ **计算管线** |
+| `.../graph.rs` | **依赖图**:前驱提取、范围包含判定、拓扑排序(Kahn) |
 | `.../functions/` | 可扩展注册表 + 8 大类别 **140** 个函数 |
 | `.../mod.rs` | 公共 API + `evaluate_sheet`(整表求值,供 WASM) |
 | `crates/wasm/src/csv_sheet.rs` | `parseCsvPacked` 接入公式求值 + `formulas` 回传 |
@@ -55,6 +56,22 @@
   ISODD ISREF ISTEXT N NA TYPE
 - **财务(5)**:FV NPER NPV PMT PV
 
+## 计算管线(依赖图 / 脏区 / 增量重算 / 循环更新)
+
+在求值器之上实现真正的电子表格重算,回应「计算合并 / 脏区 / 依赖路径分析 / 更新与循环更新策略」:
+
+| 能力 | 实现 | 验证 |
+| --- | --- | --- |
+| **依赖路径分析** | 从 AST 提取前驱(单元格+范围)+ 维护反向边;`precedents()`/`dependents()` 暴露 | ✅ `precedents(A3)={A1,A2}`、`dependents(A1)={A3}` |
+| **脏区跟踪** | 编辑只更新受影响图边,把「该格+传递后继」标脏;`dirty_cells()` 可见 | ✅ 改 A1 → 脏区恰为 `{A1,A3,A4}`,A2 不脏 |
+| **增量重算 + 计算合并** | 脏区子图 Kahn 拓扑排序,喂入干净值后按序求值,每格只算一次 | ✅ 改 A1 后 `evaluated.len()==3`,顺序前驱在前 |
+| **范围依赖** | 范围不展开成边,只在脏区上按包含判定 | ✅ 改范围内 A2 → `SUM(A1:A3)` 变脏并重算 |
+| **循环更新(默认)** | 拓扑识别环及下游 → `#REF!` | ✅ `A1=B1, B1=A1+1` → 两格 `#REF!` |
+| **循环更新(迭代)** | `set_iterative` 开启 Jacobi 迭代,`epsilon`/`max_iter` 收敛 | ✅ `A1=B1, B1=A1/2+3` 收敛到 6 |
+
+一次性构建(WASM `evaluate_sheet`)也走管线:首次全表皆脏,一次拓扑重算完成;
+`computed_value` 取结果,脏/未算过时回退惰性求值保证正确。
+
 ## 验收场景(对应 Story-0004)
 
 | 场景 | 结果 |
@@ -70,7 +87,7 @@
 
 ## 质量门禁
 
-- `cargo fmt --check` ✅ `cargo clippy --all-targets -D warnings` ✅ `cargo test --all` ✅(178)
+- `cargo fmt --check` ✅ `cargo clippy --all-targets -D warnings` ✅ `cargo test --all` ✅(**191**,含依赖图 6 + 管线 7)
 - `pnpm -C web typecheck` ✅ `pnpm -C web test` ✅(156)`pnpm -C web build` ✅
 - WASM 体积:公式引擎零新增依赖,只用标准库。
 
