@@ -65,9 +65,9 @@
 | **依赖路径分析** | 从 AST 提取前驱(单元格+范围)+ 维护反向边;`precedents()`/`dependents()` 暴露 | ✅ `precedents(A3)={A1,A2}`、`dependents(A1)={A3}` |
 | **脏区跟踪** | 编辑只更新受影响图边,把「该格+传递后继」标脏;`dirty_cells()` 可见 | ✅ 改 A1 → 脏区恰为 `{A1,A3,A4}`,A2 不脏 |
 | **增量重算 + 计算合并** | 脏区子图 Kahn 拓扑排序,喂入干净值后按序求值,每格只算一次 | ✅ 改 A1 后 `evaluated.len()==3`,顺序前驱在前 |
-| **范围依赖** | 范围不展开成边,只在脏区上按包含判定 | ✅ 改范围内 A2 → `SUM(A1:A3)` 变脏并重算 |
+| **范围依赖** | 范围不展开成边,建列索引(宽范围回退)+ 脏区按包含判定 | ✅ 改范围内 A2 → `SUM(A1:A3)` 变脏并重算;多窄范围只脏对应列;宽范围回退仍正确 |
 | **循环更新(默认)** | 拓扑识别环及下游 → `#REF!` | ✅ `A1=B1, B1=A1+1` → 两格 `#REF!` |
-| **循环更新(迭代)** | `set_iterative` 开启 Jacobi 迭代,`epsilon`/`max_iter` 收敛 | ✅ `A1=B1, B1=A1/2+3` 收敛到 6 |
+| **循环更新(迭代)** | `set_iterative` 开启迭代,Jacobi / Gauss–Seidel 可选,`epsilon`/`max_iter` 收敛 | ✅ `A1=B1, B1=A1/2+3` 两法都收敛到 6 |
 
 一次性构建(WASM `evaluate_sheet`)也走管线:首次全表皆脏,一次拓扑重算完成;
 `computed_value` 取结果,脏/未算过时回退惰性求值保证正确。
@@ -87,7 +87,7 @@
 
 ## 质量门禁
 
-- `cargo fmt --check` ✅ `cargo clippy --all-targets -D warnings` ✅ `cargo test --all` ✅(**191**,含依赖图 6 + 管线 7)
+- `cargo fmt --check` ✅ `cargo clippy --all-targets -D warnings` ✅ `cargo test --all` ✅(**194**,含依赖图/管线/索引/迭代)
 - `pnpm -C web typecheck` ✅ `pnpm -C web test` ✅(156)`pnpm -C web build` ✅
 - WASM 体积:公式引擎零新增依赖,只用标准库。
 

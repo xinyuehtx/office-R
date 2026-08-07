@@ -38,7 +38,7 @@ mod graph;
 mod parser;
 mod token;
 
-pub use eval::{RecalcReport, Workbook};
+pub use eval::{IterMethod, RecalcReport, Workbook};
 pub use graph::{Cell, Precedents};
 pub use reference::{col_to_index, index_to_col, CellRef, RangeRef};
 pub use value::{Array, ExcelError, Value};

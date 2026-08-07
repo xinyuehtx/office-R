@@ -36,6 +36,15 @@ enum CellContent {
     Formula { src: String, ast: Rc<Node> },
 }
 
+/// 迭代法:环内单元格如何逐轮更新。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IterMethod {
+    /// Jacobi:整轮都用上一轮的值同步更新(实现简单、可并行)。
+    Jacobi,
+    /// Gauss–Seidel:本轮内就地更新,后算的格立即读到先算格的新值(通常收敛更快)。
+    GaussSeidel,
+}
+
 /// 迭代计算(循环引用)配置,对应 Excel 的「启用迭代计算」选项。
 #[derive(Debug, Clone, Copy)]
 struct Iterative {
@@ -45,18 +54,25 @@ struct Iterative {
     max_iter: usize,
     /// 收敛阈值:相邻两次迭代所有环内单元格的最大数值变化小于它即停止。
     epsilon: f64,
+    /// 迭代法。
+    method: IterMethod,
 }
 
 impl Default for Iterative {
     fn default() -> Self {
-        // 默认关闭,阈值与 Excel 默认一致(100 次 / 0.001)
+        // 默认关闭,阈值与 Excel 默认一致(100 次 / 0.001),默认 Jacobi
         Iterative {
             enabled: false,
             max_iter: 100,
             epsilon: 1e-3,
+            method: IterMethod::Jacobi,
         }
     }
 }
+
+/// 范围列跨度超过它的公式不进列索引,归入「宽范围」集合(始终作为候选)。
+/// 阈值取 64:绝大多数范围要么很窄(几列)要么整列(单列),很少落在中间且极宽。
+const WIDE_RANGE_COLS: u32 = 64;
 
 /// 值层:承载字面量与公式的稀疏网格 + **计算管线**(依赖图 / 脏区 / 增量重算)。
 #[derive(Debug, Default, Clone)]
@@ -73,8 +89,11 @@ pub struct Workbook {
     precedents: HashMap<Cell, Precedents>,
     /// 反向边:单元格 → 直接引用它的公式单元格(依赖路径分析用)。
     dependents: HashMap<Cell, HashSet<Cell>>,
-    /// 读取了范围的公式单元格集合(判断范围内某格变化影响谁时只扫这些)。
-    range_readers: HashSet<Cell>,
+    /// 范围读者的**列索引**:列 → 覆盖该列的(窄)范围公式。
+    /// 编辑某格时只需查它所在列,而非扫描所有范围公式。
+    range_index: HashMap<u32, HashSet<Cell>>,
+    /// 列跨度过大(> [`WIDE_RANGE_COLS`])的范围公式:数量通常极少,始终作为候选。
+    wide_range_readers: HashSet<Cell>,
     /// 脏区:值可能已过期、待重算的单元格。
     dirty: HashSet<Cell>,
     /// 计算值缓存(上一次重算的结果)。
@@ -179,7 +198,7 @@ impl Workbook {
         self.mark_dirty(cell);
     }
 
-    /// 摘除某格作为公式时建立的前驱边(改写 / 删除前调用)。
+    /// 摘除某格作为公式时建立的前驱边与范围索引(改写 / 删除前调用)。
     fn detach(&mut self, cell: Cell) {
         if let Some(prev) = self.precedents.remove(&cell) {
             for p in prev.cells {
@@ -187,25 +206,66 @@ impl Workbook {
                     set.remove(&cell);
                 }
             }
+            self.deindex_ranges(cell, &prev.ranges);
         }
-        self.range_readers.remove(&cell);
     }
 
-    /// 依据新公式的 AST 建立前驱边(单元格入反向表,含范围者入 `range_readers`)。
+    /// 依据新公式的 AST 建立前驱边与范围索引。
     fn attach(&mut self, cell: Cell, ast: &Node) {
         let prec = graph::collect_precedents(ast);
         for p in &prec.cells {
             self.dependents.entry(*p).or_default().insert(cell);
         }
-        if !prec.ranges.is_empty() {
-            self.range_readers.insert(cell);
-        }
+        self.index_ranges(cell, &prec.ranges);
         self.precedents.insert(cell, prec);
+    }
+
+    /// 把范围公式登记进列索引;跨度过大的归入宽范围集合。
+    fn index_ranges(&mut self, cell: Cell, ranges: &[RangeRef]) {
+        if ranges.is_empty() {
+            return;
+        }
+        if ranges.iter().any(|r| r.cols() > WIDE_RANGE_COLS) {
+            // 只要有一个宽范围,就整体当宽范围处理(候选时精确判定)
+            self.wide_range_readers.insert(cell);
+            return;
+        }
+        for r in ranges {
+            for col in r.col0..=r.col1 {
+                self.range_index.entry(col).or_default().insert(cell);
+            }
+        }
+    }
+
+    /// 从索引里摘除范围公式(与 [`Self::index_ranges`] 对称)。
+    fn deindex_ranges(&mut self, cell: Cell, ranges: &[RangeRef]) {
+        if self.wide_range_readers.remove(&cell) {
+            return; // 曾是宽范围,未进列索引
+        }
+        for r in ranges {
+            for col in r.col0..=r.col1 {
+                if let Some(set) = self.range_index.get_mut(&col) {
+                    set.remove(&cell);
+                    if set.is_empty() {
+                        self.range_index.remove(&col);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 覆盖到 `col` 列的候选范围公式(宽范围 + 该列的窄范围)。
+    fn range_candidates(&self, col: u32) -> Vec<Cell> {
+        let mut out: Vec<Cell> = self.wide_range_readers.iter().copied().collect();
+        if let Some(set) = self.range_index.get(&col) {
+            out.extend(set.iter().copied());
+        }
+        out
     }
 
     /// 把 `start` 及其所有(传递)后继标记为脏。
     ///
-    /// 后继 = 直接引用它的公式(反向边)+ 范围覆盖它的公式(扫 `range_readers`)。
+    /// 后继 = 直接引用它的公式(反向边)+ 范围覆盖它的公式(只查该列的候选,而非全表)。
     fn mark_dirty(&mut self, start: Cell) {
         let mut stack = vec![start];
         while let Some(c) = stack.pop() {
@@ -215,7 +275,7 @@ impl Workbook {
             if let Some(deps) = self.dependents.get(&c) {
                 stack.extend(deps.iter().copied());
             }
-            for &f in &self.range_readers {
+            for f in self.range_candidates(c.1) {
                 if let Some(prec) = self.precedents.get(&f) {
                     if prec.ranges.iter().any(|r| graph::range_contains(r, c)) {
                         stack.push(f);
@@ -284,7 +344,7 @@ impl Workbook {
     pub fn dependents(&self, row: u32, col: u32) -> Vec<Cell> {
         let cell = (row, col);
         let mut out: HashSet<Cell> = self.dependents.get(&cell).cloned().unwrap_or_default();
-        for &f in &self.range_readers {
+        for f in self.range_candidates(col) {
             if let Some(prec) = self.precedents.get(&f) {
                 if prec.ranges.iter().any(|r| graph::range_contains(r, cell)) {
                     out.insert(f);
@@ -304,12 +364,16 @@ impl Workbook {
     }
 
     /// 开启/配置**迭代计算**(循环引用)。关闭时环内单元格得 `#REF!`。
+    /// 迭代法默认 [`IterMethod::Jacobi`],可再用 [`Workbook::set_iterative_method`] 切换。
     pub fn set_iterative(&mut self, enabled: bool, max_iter: usize, epsilon: f64) {
-        self.iterative = Iterative {
-            enabled,
-            max_iter: max_iter.max(1),
-            epsilon: epsilon.max(0.0),
-        };
+        self.iterative.enabled = enabled;
+        self.iterative.max_iter = max_iter.max(1);
+        self.iterative.epsilon = epsilon.max(0.0);
+    }
+
+    /// 设置迭代法(Jacobi / Gauss–Seidel)。
+    pub fn set_iterative_method(&mut self, method: IterMethod) {
+        self.iterative.method = method;
     }
 
     /// 取某格「已重算的计算值」;脏或未算过时退回一次性惰性求值,保证始终正确。
@@ -424,9 +488,10 @@ fn iterate_cycle(
         results.insert(c, Value::Number(0.0));
     }
     for _ in 0..cfg.max_iter {
-        // 先用「上一轮」的缓存算出本轮全部新值(Jacobi:同步更新)
-        let mut next: Vec<(Cell, Value)> = Vec::with_capacity(cyclic.len());
         let mut max_delta = 0.0f64;
+        // Jacobi:整轮都读上一轮的值,算完再统一写回;
+        // Gauss–Seidel:边算边写回,后算的格立即读到先算格的新值(通常更快收敛)。
+        let mut pending: Vec<(Cell, Value)> = Vec::with_capacity(cyclic.len());
         for &c in cyclic {
             let v = match ev.formula_ast(c) {
                 Some(ast) => ev.eval(&ast),
@@ -435,12 +500,19 @@ fn iterate_cycle(
             if let (Some(a), Some(b)) = (num_of(&v), results.get(&c).and_then(num_of)) {
                 max_delta = max_delta.max((a - b).abs());
             }
-            next.push((c, v));
+            match cfg.method {
+                IterMethod::GaussSeidel => {
+                    ev.prime(c, v.clone());
+                    results.insert(c, v);
+                }
+                IterMethod::Jacobi => pending.push((c, v)),
+            }
         }
-        // 应用本轮结果(下一轮读取)
-        for (c, v) in next {
-            ev.prime(c, v.clone());
-            results.insert(c, v);
+        if cfg.method == IterMethod::Jacobi {
+            for (c, v) in pending {
+                ev.prime(c, v.clone());
+                results.insert(c, v);
+            }
         }
         if max_delta < cfg.epsilon {
             break;
@@ -994,5 +1066,59 @@ mod tests {
         wb.recalculate();
         let report = wb.recalculate();
         assert!(report.evaluated.is_empty() && report.circular.is_empty());
+    }
+
+    #[test]
+    fn many_narrow_range_formulas_track_dirty_correctly() {
+        // 每列一个 =SUM(该列 0..9),共 10 列;编辑某列只脏该列的 SUM,不牵连其它列
+        let mut wb = Workbook::new();
+        for c in 0..10u32 {
+            for r in 0..10u32 {
+                wb.set_input(r, c, "1");
+            }
+            let col = super::super::reference::index_to_col(c);
+            wb.set_input(10, c, &format!("=SUM({col}1:{col}10)"));
+        }
+        wb.recalculate();
+        assert_eq!(wb.computed_value(10, 3), Value::Number(10.0));
+
+        // 改 D5(col 3)→ 只有第 3 列的 SUM(10,3)应变脏
+        wb.set_input(4, 3, "100");
+        let dirty = wb.dirty_cells();
+        assert!(dirty.contains(&(4, 3)) && dirty.contains(&(10, 3)));
+        assert!(
+            !dirty.contains(&(10, 0)) && !dirty.contains(&(10, 5)),
+            "其它列的 SUM 不该变脏:{dirty:?}"
+        );
+        wb.recalculate();
+        assert_eq!(wb.computed_value(10, 3), Value::Number(109.0));
+    }
+
+    #[test]
+    fn wide_range_still_tracked_via_fallback() {
+        // 跨 100 列的宽范围走「宽范围」回退集合,仍应正确响应范围内单元格的编辑
+        let mut wb = Workbook::new();
+        wb.set_input(0, 0, "1"); // A1
+        wb.set_input(0, 90, "2"); // 第 91 列第 1 行
+        wb.set_input(1, 0, "=SUM(A1:CZ1)"); // A1:CZ1 跨 104 列 > 阈值
+        wb.recalculate();
+        assert_eq!(wb.computed_value(1, 0), Value::Number(3.0));
+        wb.set_input(0, 90, "20");
+        assert!(wb.dirty_cells().contains(&(1, 0)));
+        wb.recalculate();
+        assert_eq!(wb.computed_value(1, 0), Value::Number(21.0));
+    }
+
+    #[test]
+    fn gauss_seidel_converges_and_is_not_slower() {
+        // 与 Jacobi 同一环,Gauss–Seidel 也应收敛到不动点 6
+        let mut wb = Workbook::new();
+        wb.set_input(0, 0, "=B1");
+        wb.set_input(0, 1, "=A1/2+3");
+        wb.set_iterative(true, 200, 1e-9);
+        wb.set_iterative_method(super::IterMethod::GaussSeidel);
+        wb.recalculate();
+        let a1 = wb.computed_value(0, 0).to_number().unwrap();
+        assert!((a1 - 6.0).abs() < 1e-6, "Gauss–Seidel 应收敛到 6,实际 {a1}");
     }
 }
