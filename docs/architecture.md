@@ -6,64 +6,193 @@
 
 office-R 是一个**统一的 Office 三件套应用**(文档 / 表格 / 演示),特点:
 
-- **视图层 = Web**:React + Vite + TypeScript。
-- **计算内核 = Rust**:编译为 **WASM**,在浏览器内直接识别与(未来)解析 office 文件。
+- **视图层 = Web**:React + Vite + TypeScript,表格视图用 **canvas** 绘制。
+- **计算内核 = Rust**:编译为 **WASM**,在浏览器内识别与解析 office 文件。
 - **纯静态部署**:产物为静态资源,部署到 GitHub Pages,无需后端服务器。
 
 ## 分层
 
 ```
-┌─────────────────────────────────────────────┐
-│  Web 视图层 (web/, React + Vite + TS)          │
-│  ├─ App.tsx        顶部 Tab:文档/表格/演示      │
-│  ├─ apps/{word,excel,ppt}  三个页面,各自上传入口 │
-│  ├─ apps/shared/   OfficePage / FileUpload /   │
-│  │                 useOfficeFile(复用上传逻辑)  │
-│  └─ wasm/index.ts  加载 & 封装 WASM 模块         │
-└───────────────┬─────────────────────────────┘
-                │ wasm-bindgen (Uint8Array → JS 对象)
-┌───────────────▼─────────────────────────────┐
-│  绑定层 office-wasm (crates/wasm/)             │
-│  version() / detect() / render()              │
-└───────────────┬─────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  Web 视图层 (web/, React + Vite + TS)                          │
+│  ├─ App.tsx                顶部 Tab:文档 / 表格 / 演示          │
+│  ├─ apps/word · apps/ppt   上传 → 识别 → 摘要                   │
+│  ├─ apps/excel/            CSV 表格视图(本期重点)              │
+│  │   ├─ ExcelPage.tsx      页面:上传 / 状态 / 元信息            │
+│  │   ├─ SheetCanvas.tsx    交互:尺寸自适应 / 滚轮 / 键盘 / 拖拽  │
+│  │   └─ grid/              渲染管线(见下)                      │
+│  ├─ apps/shared/           OfficePage / FileUpload /            │
+│  │                         useOfficeFile / useCsvFile /         │
+│  │                         SheetHandle 接口 / logger             │
+│  └─ wasm/                  WASM 封装 + csvWorker(解析线程)      │
+└───────────────┬──────────────────────────────────────────────┘
+                │ wasm-bindgen
+┌───────────────▼──────────────────────────────────────────────┐
+│  绑定层 office-wasm (crates/wasm/)                             │
+│  version / detect / render / parseCsvPacked / WasmSheet         │
+│  log.rs:与前端同格式的分级日志                                  │
+└───────────────┬──────────────────────────────────────────────┘
                 │ 纯 Rust 调用
-┌───────────────▼─────────────────────────────┐
-│  计算内核 office-core (crates/core/)           │
-│  ├─ format.rs   detect_format() 识别格式        │
-│  ├─ render.rs   RenderResult 数据结构           │
-│  ├─ word.rs     docx-rs 解析(段落数)          │
-│  ├─ excel.rs    calamine 解析(工作表/尺寸)     │
-│  ├─ ppt.rs      zip + quick-xml 解析(幻灯片)   │
-│  └─ lib.rs      render() 统一分发入口           │
-└─────────────────────────────────────────────┘
+┌───────────────▼──────────────────────────────────────────────┐
+│  计算内核 office-core (crates/core/)                           │
+│  ├─ format.rs   detect_format() 识别格式(含 CSV 文本判定)      │
+│  ├─ sheet.rs    Sheet:紧凑表格模型 / 窗口取数 / 列宽度量        │
+│  ├─ csv/        CSV 解析:decode(编码)· dialect(分隔符)      │
+│  │              · error(thiserror)· mod(解析主流程)         │
+│  ├─ render.rs   RenderResult 摘要结构                           │
+│  ├─ word.rs · excel.rs · ppt.rs   docx / xlsx / pptx 摘要解析   │
+│  └─ lib.rs      render() 统一分发入口                            │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 **关键设计**:`office-core` 平台无关、不依赖任何浏览器 API,因此可原生 `cargo test`;
-`office-wasm` 仅做 wasm-bindgen 绑定与序列化,薄薄一层。
+`office-wasm` 只做类型转换、跨边界搬运与日志,不含业务逻辑。
 
-## 核心依赖(见 RFC-0002)
+## 核心依赖
 
-| 用途 | crate | 备注 |
+| 用途 | crate | 许可证 | 备注 |
+| --- | --- | --- | --- |
+| xlsx 读取 | `calamine` | MIT | 纯 Rust,已验证 wasm 可用 |
+| docx 读取 | `docx-rs` | MIT | 官方支持 WebAssembly |
+| pptx / 容器 / XML | `zip`(仅 `deflate`)+ `quick-xml` | MIT | `zip` 关默认 features 以兼容 wasm |
+| **CSV 解析** | `csv` | Unlicense OR MIT | Rust 事实标准;错误带行号 |
+| **编码解码** | `encoding_rs` | (Apache-2.0 OR MIT) AND BSD-3-Clause | Firefox 同款,覆盖 GBK/Big5 等 |
+| **编码探测** | `chardetng` | Apache-2.0 OR MIT | 与 `encoding_rs` 配套 |
+| 错误 | `thiserror` | MIT OR Apache-2.0 | 轻量错误定义 |
+
+选型对比与理由见 [RFC-0002](./rfcs/0002-core-dependencies.md) 与
+[RFC-0003](./rfcs/0003-csv-canvas-grid.md)。
+
+> **异步**:主目标是浏览器 wasm,tokio 在此基本不可用,故**不引入 tokio**;
+> office 解析是同步 CPU 密集型任务,并发靠 Web Worker 解决。
+
+## 数据流一:摘要(Word / PPT / xlsx)
+
+1. 用户在页面选择 `.docx/.xlsx/.pptx`;
+2. `useOfficeFile` 读为 `Uint8Array`,调用 WASM `render(bytes)`;
+3. `office-core::render` 先 `detect_format`,再分发到对应组件;
+4. 返回 `RenderResult { format, format_name, byte_len, message, ok }`,页面展示。
+
+CSV 走下面的表格渲染路径;若把 CSV 传到 Word/演示页,会得到「请切换到表格页」的引导。
+
+## 数据流二:CSV 表格渲染(本期重点)
+
+```
+① 选择文件            useCsvFile:生成 traceId,读为字节
+② Worker 解析         csvWorker → parseCsvPacked
+                      解码(BOM/UTF-8/GBK…)→ 嗅探分隔符 → csv crate 切分
+                      → 紧凑存储 → 逐列度量显示宽度            ← 重 CPU,全在 Rust
+③ 零拷贝转移          postMessage(transfer):text / cellEnds /
+                      rowStarts / colWidthUnits 四个 ArrayBuffer 直接过户
+④ 主线程装配          WasmSheet.fromPacked → 表格常驻 WASM 线性内存
+⑤ 绘制                GridRenderer 每帧只取「可见矩形」的单元格并绘制
+```
+
+**为什么分两段**:解析必须离开主线程(否则大文件冻住 UI),而绘制取数必须同步
+(否则掉帧)。两段之间只有「移出 wasm 堆」和「移入 wasm 堆」两次必要拷贝,
+表格内容不会以 JS 字符串数组的形式整体存在。
+
+### Sheet 的紧凑表示
+
+不用 `Vec<Vec<String>>`(每格一次堆分配),而是:
+
+```
+text:       所有单元格文本按行优先首尾相接(一次大块分配)
+cell_ends:  每个单元格的结束偏移        每格仅 4 字节开销
+row_starts: 每行首个单元格的下标
+```
+
+窗口取数返回「一个大字符串 + 偏移数组」,偏移以 **UTF-16 码元**计,
+让 JS 侧可以直接 `slice`(用字节偏移会让含中文的单元格全部错位)。
+
+## canvas 渲染管线
+
+位于 `web/src/apps/excel/grid/`,分四段,每段可独立验证:
+
+```
+① 数据    SheetHandle + 按瓦片取数的窗口缓存(比瓦片再大两圈,便于增量复用)
+② 几何    geometry.ts —— 纯函数:列偏移前缀和、二分定位、可见区域、
+          命中判定、滚动条几何、指针锚点缩放      ← 全部有单测
+③ 裁剪    tile.ts —— 瓦片是否还盖得住可见区域;planScrollBlit 脏矩形
+④ 绘制    layers.ts —— paintBody / paintHeaders / paintOverlay
+```
+
+### 三张堆叠的 canvas + GPU 合成
+
+表格里三类内容的**变化频率相差两个数量级**,所以拆成三张独立的 DOM canvas
+(而不是一张画布反复重画):
+
+| 图层 | z | 内容 | 何时重画 |
+| --- | --- | --- | --- |
+| `body` | 1 | 单元格文本 + 网格线(**最贵**) | 数据/缩放变化,或滚出瓦片余量 |
+| `headers` | 2 | 行列头(便宜) | 滚动、缩放、选区变化 |
+| `overlay` | 3 | hover / 选中 / 滚动条(最便宜) | 鼠标一动就变 |
+| `surface` | 10 | 透明 `div`,承接事件与无障碍语义 | — |
+
+```
+.sheet__viewport (contain: layout paint)
+  ├─ div(裁剪容器,定位到单元格区域,overflow:hidden)
+  │    └─ canvas[data-layer=body]     ← 瓦片,靠 CSS transform 平移
+  ├─ canvas[data-layer=headers]
+  ├─ canvas[data-layer=overlay]
+  └─ div.sheet__surface               ← pointer/keyboard 都打在这里
+```
+
+三张画布的**叠加交给浏览器合成器(GPU)**,主线程不再每帧做一次全视口的
+`drawImage` 合成。画布一律 `pointer-events: none`;`will-change: transform`
+只加在真正会平移的 `body` 层(这个属性会让元素常驻显存,不该到处加)。
+
+### 滚动为什么几乎不用画
+
+`body` 是一块**比可见区域四周各大 256 设备像素**的瓦片(见 `tile.ts`):
+
+- 滚动没超出这圈余量 → 只改 `transform: translate3d(...)`,**主线程零绘制**;
+- 滚出余量 → 重新锚定瓦片(可见区域居中),用位图平移复用重叠部分,只补新露出的窄带;
+- 跳转过远 / 数据变化 → 整块重绘。
+
+代价是画布内存变大(多出边距那一圈),换来绝大多数滚动帧的绘制开销归零。
+瓦片原点与滚动量都取整到整设备像素,平移不会重采样发虚。
+
+### 其它
+
+- **单帧合并**:所有 `set*` 只打脏标记,由一次 `requestAnimationFrame` 统一出帧;
+- **设备像素坐标**:渲染器内部统一按 CSS 像素 × dpr 工作,网格线永远压在像素中心;
+  画布的后备像素与显示尺寸**同源换算**(先把后备像素向下取整到整设备像素,
+  再反推显示尺寸),这样非整数 dpr(浏览器缩放、125%/150% 显示缩放)下
+  位图也不会被重采样发虚;
+- **取数按瓦片而非可见区域**:瓦片比视口大,若按可见区域取数,瓦片边缘那圈会画成
+  空白,一平移就穿帮;
+- **输入换算**:滚轮的 `deltaMode`、触控板双轴、Shift 横滚、Ctrl 缩放都收在
+  `grid/input.ts` 的纯函数里,可单测。
+
+DOM 只承载:容器、交互层、状态栏,以及供读屏软件播报当前单元格的 live region。
+**没有一个单元格是 DOM 拼出来的。**
+
+## 可观测性
+
+前端 `apps/shared/logger.ts` 与 WASM `crates/wasm/src/log.rs` **同格式**输出:
+
+```
+[office-R][web ][info][a1b2c3] file.open name=demo.csv bytes=41672736
+[office-R][wasm][info][a1b2c3] csv.parse.ok bytes=41672736 rows=500001 cols=12 ms=451.0
+[office-R][web ][info][a1b2c3] sheet.firstFrame ms=2.8 rows=500001 cols=12
+```
+
+同一次打开共用 `traceId`,两侧日志可串联。级别 `debug/info/warn/error/off`,
+默认开发 `info` / 生产 `warn`,可用 `?logLevel=debug` 或
+`localStorage.officeR.logLevel` 调整;级别变化会同步给 WASM 侧。
+**日志绝不打印单元格内容**(`Sheet` 的 `Debug` 也只输出维度)。
+
+## 扩展边界(本期刻意不实现)
+
+`Sheet` 只承载**纯文本单元格** —— CSV 本身也不携带更多信息。后续演进的边界:
+
+| 能力 | 应该加在哪 | 不应该怎么做 |
 | --- | --- | --- |
-| xlsx 读取 | `calamine` | 纯 Rust,已验证 wasm 可用 |
-| docx 读取 | `docx-rs` | 官方支持 WebAssembly |
-| pptx / 容器 / XML | `zip`(仅 `deflate`)+ `quick-xml` | `zip` 关默认 features 以兼容 wasm |
-| 错误 | `thiserror` | 轻量错误定义 |
-
-> **异步**:主目标是浏览器 wasm,tokio 在此基本不可用(阻塞 UI、timer panic 等),
-> 故当前**不引入 tokio**;office 解析为同步 CPU 密集型。详见 RFC-0002。
-
-## 数据流:读取并渲染一个 office 文件
-
-1. 用户在某个页面点击上传入口,选择 `.docx/.xlsx/.pptx`。
-2. `useOfficeFile` 读取文件为 `Uint8Array`。
-3. 调用 WASM `render(bytes)`。
-4. `office-core::render` 先 `detect_format`(扫描 ZIP 魔数与特征目录 `word/`、`xl/`、`ppt/`),
-   再分发到对应组件的 `render_placeholder`。
-5. 返回 `RenderResult { format, format_name, byte_len, message, ok }`,页面渲染。
-
-> 当前为**最小真实解析**阶段:xlsx 读工作表/尺寸、docx 读段落数、pptx 读幻灯片与文本块数;
-> 解析失败会以 `ok=false` + 原因优雅降级,不 panic。后续按 RFC/Spec 逐步丰富解析深度。
+| 值类型 / 数字与日期格式化 | 在 `Sheet` **之外**新增「值层 / 格式层」,绘制时查表 | ❌ 把格式化塞进 `Sheet` 或在绘制代码里判断内容像不像日期 |
+| 公式求值 | 独立的求值模块,产出结果再喂给 `Sheet` | ❌ 让渲染管线感知公式 |
+| 图表 | 独立组件,复用 `SheetHandle` 取数 | ❌ 混进表格渲染管线 |
+| xlsx 表格视图 | 新增解析入口产出 `Sheet`,视图层复用 `SheetHandle` 接口,**一行不改** | ❌ 为 xlsx 再写一套渲染 |
 
 ## 目录结构
 
@@ -71,15 +200,23 @@ office-R 是一个**统一的 Office 三件套应用**(文档 / 表格 / 演示)
 office-R/
 ├── crates/            Rust cargo workspace
 │   ├── core/          office-core:平台无关计算内核
-│   └── wasm/          office-wasm:wasm-bindgen 绑定
+│   │   └── src/csv/   CSV 解析(decode / dialect / error)
+│   └── wasm/          office-wasm:wasm-bindgen 绑定 + 日志
 ├── web/               React + Vite + TS 视图层(pnpm 管理)
-│   └── src/wasm/pkg/  wasm-pack 生成产物(不入库)
-├── docs/              RFC / Spec / Story / 工作流 / 架构
+│   ├── src/apps/      三个页面 + shared 复用
+│   │   └── excel/grid/  canvas 渲染管线
+│   ├── src/wasm/      WASM 封装、解析 Worker(pkg/ 为构建产物,不入库)
+│   └── src/test/      测试基建:setup、canvas 替身、表格替身
+├── docs/              RFC / Spec / Story / 报告 / 工作流 / 架构
 └── .github/workflows/ CI 与 Pages 部署
 ```
 
 ## 构建与部署
 
 - WASM:`wasm-pack build crates/wasm --target web --out-dir web/src/wasm/pkg`
-- 前端:`cd web && pnpm build`(通过 `VITE_BASE` 设置 Pages 子路径)
+- 前端:`pnpm -C web build`(通过 `VITE_BASE` 设置 Pages 子路径)
 - 部署:推送 `main` → GitHub Actions 构建 WASM + 前端 → 部署到 GitHub Pages
+
+> 改动 `crates/core` 的公共数据结构后**务必重新构建 WASM**:
+> 前端引用的是 `web/src/wasm/pkg` 里的产物,不重建就会拿着旧的二进制跑,
+> 症状往往是「单元格内容错位」这类难以定位的问题。

@@ -1,0 +1,77 @@
+/**
+ * 表格数据源的抽象。
+ *
+ * 渲染管线只依赖这个接口,不关心数据是来自 WASM 还是测试替身 ——
+ * 这让 canvas 绘制逻辑可以在 jsdom 里单测,也让将来接入 xlsx 时
+ * 视图层一行都不用改。
+ */
+
+/** 解析元信息(不含任何单元格内容,可安全打日志)。 */
+export interface SheetMeta {
+  /** 实际使用的文本编码,如 `UTF-8`、`GBK`。 */
+  encoding: string;
+  /** 实际使用的分隔符字符。 */
+  delimiter: string;
+  /** 分隔符的来源:显式指定 / 嗅探得出 / 兜底默认值。 */
+  delimiterSource: "explicit" | "sniffed" | "fallback";
+  /** 是否有字符无法解码(内容可能不完全准确)。 */
+  lossy: boolean;
+  /** 行数。 */
+  rows: number;
+  /** 列数。 */
+  cols: number;
+  /** 是否因超过行数上限被截断。 */
+  truncatedRows: boolean;
+  /** 是否因超过列数上限被截断。 */
+  truncatedCols: boolean;
+  /** 内核解析耗时(毫秒)。 */
+  parseMs: number;
+}
+
+/**
+ * 一块矩形区域内的单元格文本。
+ *
+ * 用「一个大字符串 + 偏移数组」而不是 `string[][]`:
+ * 跨 WASM 边界只需两次拷贝,也避免了每次滚动都产生上千个字符串对象。
+ */
+export interface CellWindowData {
+  /** 区域内单元格文本按行优先首尾相接。 */
+  text: string;
+  /** 每个单元格在 `text` 中的结束偏移(以 UTF-16 码元计,可直接用于 slice)。 */
+  ends: Uint32Array;
+  /** 区域行数。 */
+  rows: number;
+  /** 区域列数。 */
+  cols: number;
+}
+
+/** 只读表格句柄。 */
+export interface SheetHandle {
+  /** 行数。 */
+  readonly rows: number;
+  /** 列数。 */
+  readonly cols: number;
+  /** 各列建议显示宽度(单位:半角字符数)。 */
+  readonly colWidthUnits: Uint32Array;
+  /** 取 `[row0, row1) × [col0, col1)` 区域的单元格文本。入参越界会被夹紧。 */
+  window(row0: number, row1: number, col0: number, col1: number): CellWindowData;
+  /** 释放底层资源(WASM 线性内存里的表格)。 */
+  dispose(): void;
+}
+
+/**
+ * 把窗口数据摊平成 `string[]`(行优先),供绘制阶段按下标取用。
+ *
+ * 只在**可见区域发生变化**时调用一次,绘制时直接读数组,
+ * 因此每帧不会有字符串切片的开销。
+ */
+export function flattenWindow(window: CellWindowData): string[] {
+  const cells = new Array<string>(window.rows * window.cols);
+  let start = 0;
+  for (let i = 0; i < cells.length; i += 1) {
+    const end = window.ends[i] ?? start;
+    cells[i] = start === end ? "" : window.text.slice(start, end);
+    start = end;
+  }
+  return cells;
+}

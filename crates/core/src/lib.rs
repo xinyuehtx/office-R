@@ -1,34 +1,57 @@
 //! office-core:平台无关的 office 计算内核。
 //!
-//! 负责 office 文件的**识别**与(骨架阶段的)**渲染**,不依赖任何浏览器 /
+//! 负责 office 文件的**识别**与**解析**,不依赖任何浏览器 /
 //! 操作系统 API,因此可原生单测,也可被 `office-wasm` 编译进 WASM。
+//!
+//! # 两条使用路径
+//!
+//! - [`render`]:识别格式 + 产出一段**摘要文本**,用于「这是什么文件」这类轻量场景。
+//! - [`csv::parse`]:把 CSV 解析成 [`sheet::Sheet`],供视图层做表格渲染 ——
+//!   这是本期 Excel 切片的主路径。
+//!
+//! # 扩展边界(本期不实现)
+//!
+//! 公式求值、数字/日期格式化、图表都**不在** [`sheet::Sheet`] 里:
+//! 它只承载「纯文本单元格」。将来接入 xlsx 时应在其之上新增独立的值层 /
+//! 格式层,而不是把这些概念混进表格模型。详见 `docs/architecture.md`。
 
+pub mod csv;
 pub mod excel;
 pub mod format;
 pub mod ppt;
 pub mod render;
+pub mod sheet;
 pub mod word;
 
+pub use csv::{CsvDocument, CsvError, CsvMeta, CsvOptions};
 pub use format::{detect_format, Format};
 pub use render::RenderResult;
+pub use sheet::{CellWindow, PackedSheet, Sheet, SheetError};
 
 /// 内核版本(取自 Cargo 包版本)。
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// 识别文件格式并分发到对应组件进行(占位)渲染。
+/// 识别文件格式并分发到对应组件产出摘要。
 ///
-/// 这是「读取 office 文件 → 识别 → 渲染」的统一入口。
+/// 这是「读取 office 文件 → 识别 → 摘要」的统一入口。
+/// CSV 的完整渲染走 [`csv::parse`],不经过这里。
 pub fn render(bytes: &[u8]) -> RenderResult {
     match detect_format(bytes) {
         Format::Docx => word::render(bytes),
         Format::Xlsx => excel::render(bytes),
         Format::Pptx => ppt::render(bytes),
+        // CSV 走表格渲染路径,这里只做引导,避免用户在 Word/演示 页面困惑
+        Format::Csv => RenderResult::err(
+            Format::Csv,
+            bytes.len(),
+            "这是 CSV 文本表格,请切换到「表格」页查看渲染结果。",
+        ),
         Format::Unknown => RenderResult::err(
             Format::Unknown,
             bytes.len(),
-            "无法识别的文件格式,请上传 .docx / .xlsx / .pptx 文件。",
+            "无法识别的文件格式,请上传 .docx / .xlsx / .pptx / .csv 文件。",
         ),
     }
 }
@@ -50,6 +73,14 @@ mod tests {
             render(b"PK\x03\x04ppt/presentation.xml").format,
             Format::Pptx
         );
+    }
+
+    #[test]
+    fn render_guides_csv_to_the_sheet_page() {
+        let result = render(b"a,b\n1,2\n");
+        assert_eq!(result.format, Format::Csv);
+        assert!(!result.ok);
+        assert!(result.message.contains("表格"));
     }
 
     #[test]

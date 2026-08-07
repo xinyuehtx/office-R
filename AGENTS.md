@@ -11,7 +11,12 @@ office-R 是一个**统一的 Office 三件套应用**(文档 Word / 表格 Exce
 - **计算内核 = Rust**:编译为 **WASM**,在浏览器内识别与(未来)解析 office 文件。
 - **部署**:纯静态产物 → **GitHub Pages**,无需服务器。
 
-当前实现**最小真实解析**:xlsx(calamine)、docx(docx-rs)、pptx(zip + quick-xml),三页面各具上传入口,打通「上传 → 识别 → 解析摘要」全链路。解析失败优雅降级。
+当前能力:
+
+- **表格页(本期重点)**:上传 **CSV** → WASM 解析(编码探测 / 分隔符嗅探 / 列切分)→ **canvas 表格视图**,支持滚动、缩放、键盘与拖拽。视图由**三张堆叠的 canvas** 组成(单元格 / 表头 / 覆盖层),叠加交给浏览器合成器用 GPU 完成;单元格层是超出视口一圈的瓦片,多数滚动帧只改 CSS transform、主线程零绘制。50 万行流畅浏览。见 [RFC-0003](./docs/rfcs/0003-csv-canvas-grid.md)。
+- **文档 / 演示页**:最小真实解析,打通「上传 → 识别 → 解析摘要」全链路。xlsx(calamine)、docx(docx-rs)、pptx(zip + quick-xml)。
+
+解析失败优雅降级:错误类型清晰(`thiserror`)、提示中文可操作、可重新选择文件重试。
 
 ## 架构
 
@@ -25,19 +30,26 @@ web/ (React 视图)  ──wasm-bindgen──▶  crates/wasm (绑定)  ──�
 - `crates/wasm`(`office-wasm`):wasm-bindgen 绑定层,薄。
 - `web/`:视图层,`src/apps/{word,excel,ppt}` 三页面 + `src/apps/shared` 复用组件。
 
-**核心依赖**(选型理由见 [docs/rfcs/0002-core-dependencies.md](./docs/rfcs/0002-core-dependencies.md)):
-`calamine`(xlsx)、`docx-rs`(docx)、`zip`(仅 `deflate`)+ `quick-xml`(pptx)、`thiserror`。
+**重 CPU 逻辑一律在 Rust/WASM 侧**:文件解析、列切分、列宽度量都在 `office-core`;
+前端只负责「取可见区域 + 绘制」。CSV 解析跑在 Web Worker 里,主线程不被阻塞。
+
+**核心依赖**(选型理由见 [RFC-0002](./docs/rfcs/0002-core-dependencies.md) 与 [RFC-0003](./docs/rfcs/0003-csv-canvas-grid.md)):
+`calamine`(xlsx)、`docx-rs`(docx)、`zip`(仅 `deflate`)+ `quick-xml`(pptx)、
+`csv` + `encoding_rs` + `chardetng`(CSV 解析与编码)、`thiserror`。
 **不引入 tokio**:浏览器 wasm 下 tokio 基本不可用,office 解析为同步 CPU 密集型。
 
 ## 目录结构
 
 ```
-crates/core/        Rust 计算内核(format/render/word/excel/ppt)
-crates/wasm/        WASM 绑定(version/detect/render)
+crates/core/        Rust 计算内核(format/sheet/csv/render/word/excel/ppt)
+crates/wasm/        WASM 绑定(version/detect/render/parseCsvPacked/WasmSheet)+ 分级日志
 web/                React + Vite + TS(pnpm)
-  src/apps/         三个页面 + shared 复用(OfficePage/FileUpload/useOfficeFile)
-  src/wasm/         WASM 加载封装(pkg/ 为构建产物,不入库)
-docs/               workflow / architecture / rfcs / specs / stories
+  src/apps/         三个页面 + shared 复用(OfficePage/FileUpload/useOfficeFile/
+                    useCsvFile/SheetHandle/logger)
+  src/apps/excel/grid/  canvas 渲染管线(geometry/tile/layers/renderer/input/labels/theme)
+  src/wasm/         WASM 加载封装 + csvWorker 解析线程(pkg/ 为构建产物,不入库)
+  src/test/         测试基建(setup/canvas 替身/表格替身)
+docs/               workflow / architecture / rfcs / specs / stories / reports
 .github/workflows/  ci.yml(CI)、deploy-pages.yml(Pages 部署)
 ```
 
@@ -68,6 +80,10 @@ pnpm -C web build                # 产物在 web/dist
 ```
 
 > 首次运行前需先 `wasm-pack build` 生成 `web/src/wasm/pkg`,否则前端无法解析 WASM 引用。
+>
+> **改动 `crates/core` 的公共数据结构后必须重新 `wasm-pack build`**:前端引用的是
+> `pkg/` 里的二进制产物,忘记重建会让前端拿着旧内核跑,症状通常是「内容错位」这类
+> 很难定位的问题。
 
 ## 工作流(SDD + TDD)
 
@@ -92,8 +108,10 @@ pnpm -C web build                # 产物在 web/dist
 
 - **Rust**:遵循 `rustfmt` 默认风格;公共 API 写文档注释(`///`);`office-core` 不引入浏览器/OS 依赖。
 - **TypeScript**:严格模式;组件用函数式;共享逻辑抽到 `apps/shared`。
-- **注释与文档以中文为主**,与团队沟通语言一致。
+- **注释与文档以中文为主**,与团队沟通语言一致;注释解释**为什么**这么做,而不是复述代码。
 - 单元测试与被测代码就近(Rust 用 `#[cfg(test)]`,前端用同目录 `*.test.tsx`)。
+- **日志**:统一走 `apps/shared/logger.ts`(前端)与 `crates/wasm/src/log.rs`(内核),
+  两侧格式一致、共用 traceId;**绝不打印用户文件内容**。禁止把裸 `console.log` 留在代码里。
 
 ## 提交规范
 

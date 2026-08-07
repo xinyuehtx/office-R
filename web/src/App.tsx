@@ -14,9 +14,11 @@ const TABS: { key: TabKey; label: string }[] = [
 
 export default function App() {
   const [tab, setTab] = useState<TabKey>("word");
+  // 表格页要让 canvas 撑满视口剩余高度,需要一条从 body 到画布的完整高度链
+  const isSheetTab = tab === "excel";
 
   return (
-    <div className="app">
+    <div className={isSheetTab ? "app app--fill" : "app"}>
       <header className="app__bar">
         <h1 className="app__title">office-R</h1>
         <nav className="app__tabs" role="tablist">
@@ -34,7 +36,8 @@ export default function App() {
         </nav>
       </header>
 
-      <main className="app__main">
+      {/* 表格页要尽可能大的绘制区域,单独放宽容器 */}
+      <main className={isSheetTab ? "app__main app__main--wide" : "app__main"}>
         {tab === "word" && <WordPage />}
         {tab === "excel" && <ExcelPage />}
         {tab === "ppt" && <PptPage />}

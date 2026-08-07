@@ -53,6 +53,32 @@
   margin: 0 auto;
 }
 
+/* 表格页需要尽可能大的绘制区域,因此不受 900px 阅读宽度限制 */
+.app__main--wide {
+  max-width: 1440px;
+}
+
+/*
+ * 表格页专用:把视口高度一路传递到 canvas。
+ *
+ * canvas 不像 DOM 会按内容自动长高,它的尺寸必须由容器明确给出;
+ * 所以从 .app 到 .sheet__viewport 这条链上每一层都要有确定高度
+ * (`min-height: 0` 是必须的 —— flex 子项默认不小于内容尺寸,
+ *  少了它内部的滚动区域就压不下来)。
+ */
+.app--fill {
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app--fill .app__main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* 窗口过矮时让整页滚动,而不是把表格压扁 */
+  overflow: auto;
+}
+
 .office-page__header h2 {
   margin: 0 0 4px;
 }
@@ -129,4 +155,155 @@
 
 .office-page__meta dd {
   margin: 0;
+}
+
+/* ---------- 表格(CSV)视图 ---------- */
+
+.office-page--sheet {
+  display: flex;
+  flex-direction: column;
+  /* 让 canvas 视口能撑满剩余高度:表格是本页的主角 */
+  min-height: 0;
+  flex: 1;
+}
+
+.office-page__filesize {
+  margin-left: 8px;
+  color: #57606a;
+}
+
+.office-page__link {
+  border: none;
+  background: transparent;
+  color: #0969da;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px 8px;
+}
+
+.office-page__link:hover {
+  text-decoration: underline;
+}
+
+.office-page__hint {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #57606a;
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+.office-page__hint:not(ul) {
+  padding-left: 0;
+}
+
+.office-page__muted {
+  color: #57606a;
+  margin-left: 8px;
+  font-size: 13px;
+}
+
+.office-page__warn {
+  color: #9a6700;
+  margin-left: 8px;
+  font-size: 13px;
+}
+
+.sheet {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #d0d7de;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+  flex: 1;
+  /* 窗口再矮也保证表格有可用高度,不够就让外层滚动 */
+  min-height: 360px;
+}
+
+/*
+ * 三张堆叠的画布由渲染器插入这个容器,靠 z-index 分层:
+ *   body(瓦片,transform 平移) < headers(固定表头) < surface(交互层)
+ * 每层的显示尺寸由渲染器用 JS 设置 —— 后备像素与显示尺寸必须同源换算,
+ * 才能保证位图与屏幕像素 1:1、不重采样发虚,所以这里不要给画布定尺寸。
+ */
+.sheet__viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  /* 把内部的布局与绘制隔离出去,层内变化不会波及页面其余部分 */
+  contain: layout paint;
+}
+
+.sheet__viewport canvas[data-layer="body"] {
+  z-index: 1;
+}
+
+.sheet__viewport canvas[data-layer="headers"] {
+  z-index: 2;
+}
+
+.sheet__viewport canvas[data-layer="overlay"] {
+  z-index: 3;
+}
+
+/*
+ * 透明的交互层:压在所有画布之上,统一接收指针与键盘事件。
+ * 画布本身是 pointer-events: none,只负责显示。
+ */
+.sheet__surface {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  /* 触控板的双指滚动要交给我们自己处理,否则会先被浏览器吃掉 */
+  touch-action: none;
+  cursor: cell;
+  outline: none;
+}
+
+.sheet__surface:focus-visible {
+  box-shadow: inset 0 0 0 2px #0969da;
+}
+
+/* 只对读屏软件可见:canvas 内容无法被读取,用它播报当前单元格 */
+.sheet__live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.sheet__status {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 6px 12px;
+  border-top: 1px solid #d0d7de;
+  background: #f6f8fa;
+  font-size: 12px;
+  color: #57606a;
+}
+
+.sheet__status-cell {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sheet__status-value {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheet__status-spacer {
+  flex: 1;
 }
