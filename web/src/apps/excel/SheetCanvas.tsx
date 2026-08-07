@@ -54,6 +54,12 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
     return window.text;
   }, [sheet, selection]);
 
+  /** 选中单元格的原始公式(若是公式格);单元格里显示的是计算值。 */
+  const selectedFormula = useMemo(
+    () => sheet.formula?.(selection.row, selection.col) ?? null,
+    [sheet, selection],
+  );
+
   // 建立渲染器,并把容器尺寸 / 设备像素比变化喂给它
   useEffect(() => {
     const container = containerRef.current;
@@ -349,6 +355,23 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
 
   return (
     <div className="sheet">
+      {/* 公式栏:左侧显示当前地址,右侧显示原始公式(公式格)或计算值 */}
+      <div className="sheet__formula-bar" data-testid="formula-bar">
+        <span className="sheet__formula-address">{address}</span>
+        <span className="sheet__formula-input" title={selectedFormula ?? selectedText}>
+          {selectedFormula ? (
+            <>
+              <span className="sheet__formula-badge" aria-label="公式">
+                ƒ
+              </span>
+              {selectedFormula}
+            </>
+          ) : (
+            selectedText || <span className="sheet__formula-empty">(空)</span>
+          )}
+        </span>
+      </div>
+
       {/* 三张堆叠画布由渲染器插入这里;它们只负责像素,不接收事件 */}
       <div className="sheet__viewport" ref={containerRef}>
         <div

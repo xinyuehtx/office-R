@@ -20,9 +20,13 @@
   滚动零掉帧且主线程绘制仅 0.53 ms/帧 —— 多数滚动帧只改一个 CSS transform、**完全不绘制**
   ([实测数据](./docs/reports/0001-csv-grid-acceptance.md))
 - 解析在 Web Worker 中完成,主线程不冻结;非整数 dpr(浏览器缩放 / 125% 显示缩放)下文字不发虚
+- **公式计算引擎(Rust/WASM)**:以 `=` 开头的单元格按 **Excel 语义**求值,内置 **140+ 函数**
+  (SUM/IF/VLOOKUP/DATE/PMT…),对齐运算符优先级、错误值(`#DIV/0!`)、类型强制与循环检测;
+  网格显示计算值,选中后公式栏回显原始公式。点页面上的「加载公式示例」即可体验
+  ([RFC-0004](./docs/rfcs/0004-formula-engine.md))
 
-本期**不含**公式、数字/日期格式化、图表与编辑 —— 详见
-[RFC-0003](./docs/rfcs/0003-csv-canvas-grid.md) 的范围说明。
+本期**不含**数字/日期格式化、图表、单元格编辑与动态数组溢出 —— 详见
+[RFC-0003](./docs/rfcs/0003-csv-canvas-grid.md) 与 [RFC-0004](./docs/rfcs/0004-formula-engine.md) 的范围说明。
 
 **文档 · Word / 演示 · PowerPoint**:上传 `.docx` / `.pptx`,识别格式并给出解析摘要。
 

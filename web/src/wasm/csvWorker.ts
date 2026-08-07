@@ -9,7 +9,7 @@
 
 import init, { parseCsvPacked, setLogLevel } from "./pkg/office_wasm.js";
 import type { LogLevel } from "../apps/shared/logger";
-import type { SheetMeta } from "../apps/shared/sheet";
+import type { CellFormula, SheetMeta } from "../apps/shared/sheet";
 
 /** 主线程 → Worker 的请求。 */
 export interface CsvWorkerRequest {
@@ -21,6 +21,8 @@ export interface CsvWorkerRequest {
   delimiter: number;
   /** 日志级别,与主线程保持一致。 */
   logLevel: LogLevel;
+  /** 当前时刻的 Excel 序列数,注入给公式 TODAY/NOW。 */
+  nowSerial: number;
 }
 
 /** Worker → 主线程的响应。 */
@@ -33,6 +35,8 @@ export type CsvWorkerResponse =
       colWidthUnits: ArrayBuffer;
       cols: number;
       meta: SheetMeta;
+      /** 公式单元格清单(结构化克隆,数据量小)。 */
+      formulas: CellFormula[];
     }
   | { ok: false; message: string };
 
@@ -44,14 +48,15 @@ function ensureReady(): Promise<unknown> {
 }
 
 self.onmessage = async (event: MessageEvent<CsvWorkerRequest>) => {
-  const { bytes, traceId, delimiter, logLevel } = event.data;
+  const { bytes, traceId, delimiter, logLevel, nowSerial } = event.data;
   try {
     await ensureReady();
     setLogLevel(logLevel);
 
-    const packed = parseCsvPacked(new Uint8Array(bytes), traceId, delimiter);
+    const packed = parseCsvPacked(new Uint8Array(bytes), traceId, delimiter, nowSerial);
     try {
       const meta = packed.meta as SheetMeta;
+      const formulas = packed.formulas as CellFormula[];
       const text = packed.takeText();
       const cellEnds = packed.takeCellEnds();
       const rowStarts = packed.takeRowStarts();
@@ -60,6 +65,7 @@ self.onmessage = async (event: MessageEvent<CsvWorkerRequest>) => {
         ok: true,
         cols: packed.cols,
         meta,
+        formulas,
         text: text.buffer as ArrayBuffer,
         cellEnds: cellEnds.buffer as ArrayBuffer,
         rowStarts: rowStarts.buffer as ArrayBuffer,

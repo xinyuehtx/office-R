@@ -29,8 +29,8 @@ office-R 是一个**统一的 Office 三件套应用**(文档 / 表格 / 演示)
                 │ wasm-bindgen
 ┌───────────────▼──────────────────────────────────────────────┐
 │  绑定层 office-wasm (crates/wasm/)                             │
-│  version / detect / render / parseCsvPacked / WasmSheet         │
-│  log.rs:与前端同格式的分级日志                                  │
+│  version / detect / render / parseCsvPacked(含公式求值)/       │
+│  WasmSheet     log.rs:与前端同格式的分级日志                    │
 └───────────────┬──────────────────────────────────────────────┘
                 │ 纯 Rust 调用
 ┌───────────────▼──────────────────────────────────────────────┐
@@ -39,6 +39,8 @@ office-R 是一个**统一的 Office 三件套应用**(文档 / 表格 / 演示)
 │  ├─ sheet.rs    Sheet:紧凑表格模型 / 窗口取数 / 列宽度量        │
 │  ├─ csv/        CSV 解析:decode(编码)· dialect(分隔符)      │
 │  │              · error(thiserror)· mod(解析主流程)         │
+│  ├─ formula/    公式引擎:token→parser→ast→eval + functions/    │
+│  │              值层 Workbook,对齐 Excel(140+ 函数)          │
 │  ├─ render.rs   RenderResult 摘要结构                           │
 │  ├─ word.rs · excel.rs · ppt.rs   docx / xlsx / pptx 摘要解析   │
 │  └─ lib.rs      render() 统一分发入口                            │
@@ -82,10 +84,14 @@ CSV 走下面的表格渲染路径;若把 CSV 传到 Word/演示页,会得到「
 ② Worker 解析         csvWorker → parseCsvPacked
                       解码(BOM/UTF-8/GBK…)→ 嗅探分隔符 → csv crate 切分
                       → 紧凑存储 → 逐列度量显示宽度            ← 重 CPU,全在 Rust
+②' 公式求值(如有)    若含 `=` 单元格 → 建 Workbook → 求值 → 公式格
+                      换成计算值(显示表),公式原文单独回传   ← 无公式则零开销
 ③ 零拷贝转移          postMessage(transfer):text / cellEnds /
                       rowStarts / colWidthUnits 四个 ArrayBuffer 直接过户
+                      + formulas(公式原文,数据量小,结构化克隆)
 ④ 主线程装配          WasmSheet.fromPacked → 表格常驻 WASM 线性内存
 ⑤ 绘制                GridRenderer 每帧只取「可见矩形」的单元格并绘制
+                      公式栏用 SheetHandle.formula(r,c) 回显选中格的原始公式
 ```
 
 **为什么分两段**:解析必须离开主线程(否则大文件冻住 UI),而绘制取数必须同步
@@ -183,6 +189,31 @@ DOM 只承载:容器、交互层、状态栏,以及供读屏软件播报当前�
 `localStorage.officeR.logLevel` 调整;级别变化会同步给 WASM 侧。
 **日志绝不打印单元格内容**(`Sheet` 的 `Debug` 也只输出维度)。
 
+## 公式引擎(`crates/core/src/formula/`)
+
+一条经典**解释器管线** + 一个独立的**值/公式层**,语义对齐 Excel(详见 [RFC-0004](./rfcs/0004-formula-engine.md)):
+
+```
+公式文本 "=SUM(A1:A3)*2"
+  token.rs   词法:数字/字符串/布尔/错误/引用/运算符/函数
+  parser.rs  语法:Pratt 优先级爬升(: > 一元 - > % > ^ > * / > + - > & > 比较)→ AST
+  eval.rs    求值:错误传播 + 类型强制 + 范围展开;Workbook 值层承载字面量/公式,
+             按需求值 + 记忆化缓存 + 循环检测(环 → #REF!,不 panic/不死循环)
+  functions/ 可扩展注册表:math/stats/logical/text/datetime/lookup/info/financial(140+)
+```
+
+**关键取舍**:
+
+- **错误是一等值**(`#DIV/0!` 等沿链传播),不是逐层 `Result` 中断 —— `IFERROR` 才可能实现。
+- 函数拿到**未求值的 AST 参数** + 求值器句柄:`IF` 能短路,聚合函数能遍历范围而不物化。
+- **补齐更多 Excel 函数是机械式的**:在类别文件写实现、在其 `register` 插一行,不碰求值器。
+- `Sheet` 保持**只读纯文本**;公式引擎是它之上独立的值层,与下方「扩展边界」的方向一致。
+- `TODAY`/`NOW` 的「当前时间」由外部注入(前端传 `Date` 换算的序列数),core 不读系统时钟。
+
+CSV 表格页的落地:含 `=` 单元格的文件由 `formula::evaluate_sheet` 求值,网格显示**计算值**、
+公式栏回显**原始公式**(与 Excel「格显示值、栏显示式」一致)。**非目标**:动态数组溢出、
+跨表引用、具名区域、engineering/database/cube 类别。
+
 ## 扩展边界(本期刻意不实现)
 
 `Sheet` 只承载**纯文本单元格** —— CSV 本身也不携带更多信息。后续演进的边界:
@@ -190,7 +221,7 @@ DOM 只承载:容器、交互层、状态栏,以及供读屏软件播报当前�
 | 能力 | 应该加在哪 | 不应该怎么做 |
 | --- | --- | --- |
 | 值类型 / 数字与日期格式化 | 在 `Sheet` **之外**新增「值层 / 格式层」,绘制时查表 | ❌ 把格式化塞进 `Sheet` 或在绘制代码里判断内容像不像日期 |
-| 公式求值 | 独立的求值模块,产出结果再喂给 `Sheet` | ❌ 让渲染管线感知公式 |
+| 公式求值 | ✅ 已实现:独立的 `formula` 模块([值层 `Workbook`])求值,产出显示表喂给 `Sheet` | ❌ 让渲染管线感知公式 |
 | 图表 | 独立组件,复用 `SheetHandle` 取数 | ❌ 混进表格渲染管线 |
 | xlsx 表格视图 | 新增解析入口产出 `Sheet`,视图层复用 `SheetHandle` 接口,**一行不改** | ❌ 为 xlsx 再写一套渲染 |
 
@@ -200,7 +231,8 @@ DOM 只承载:容器、交互层、状态栏,以及供读屏软件播报当前�
 office-R/
 ├── crates/            Rust cargo workspace
 │   ├── core/          office-core:平台无关计算内核
-│   │   └── src/csv/   CSV 解析(decode / dialect / error)
+│   │   ├── src/csv/   CSV 解析(decode / dialect / error)
+│   │   └── src/formula/  公式引擎(token/parser/ast/eval + functions/)
 │   └── wasm/          office-wasm:wasm-bindgen 绑定 + 日志
 ├── web/               React + Vite + TS 视图层(pnpm 管理)
 │   ├── src/apps/      三个页面 + shared 复用

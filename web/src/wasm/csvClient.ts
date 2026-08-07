@@ -9,7 +9,7 @@
 
 import { getLogLevel, type Tracer } from "../apps/shared/logger";
 import type { SheetHandle } from "../apps/shared/sheet";
-import { parseCsv, sheetFromPacked, type PackedSheetTransfer } from "./index";
+import { nowSerial, parseCsv, sheetFromPacked, type PackedSheetTransfer } from "./index";
 import type { CsvWorkerRequest, CsvWorkerResponse } from "./csvWorker";
 
 /** 解析结果与耗时明细。 */
@@ -77,6 +77,7 @@ function parseInWorker(
         colWidthUnits: new Uint32Array(data.colWidthUnits),
         cols: data.cols,
         meta: data.meta,
+        formulas: data.formulas,
       });
     };
     worker.onerror = (event) => {
@@ -91,6 +92,7 @@ function parseInWorker(
       traceId,
       delimiter,
       logLevel: getLogLevel(),
+      nowSerial: nowSerial(),
     };
     try {
       worker.postMessage(request, [buffer]);

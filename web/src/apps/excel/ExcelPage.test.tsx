@@ -14,8 +14,12 @@ vi.mock("../../wasm/csvClient", () => ({
 const parseCsvFile = vi.mocked(csvClient.parseCsvFile);
 
 /** 造一个解析成功的返回值。 */
-function successOutcome(rows: string[][], metaOverrides = {}) {
-  const sheet = createFixtureSheet(rows);
+function successOutcome(
+  rows: string[][],
+  metaOverrides = {},
+  formulas: Record<string, string> = {},
+) {
+  const sheet = createFixtureSheet(rows, formulas);
   return {
     sheet,
     packed: {
@@ -25,6 +29,10 @@ function successOutcome(rows: string[][], metaOverrides = {}) {
       colWidthUnits: sheet.colWidthUnits,
       cols: sheet.cols,
       meta: fixtureMeta({ rows: sheet.rows, cols: sheet.cols, ...metaOverrides }),
+      formulas: Object.entries(formulas).map(([key, formula]) => {
+        const [row, col] = key.split(",").map(Number);
+        return { row, col, formula };
+      }),
     },
     offMainThread: true,
     parseMs: 12,
@@ -101,6 +109,39 @@ describe("ExcelPage", () => {
     await upload();
 
     expect(await screen.findByText(/已达上限,超出部分未显示/)).toBeInTheDocument();
+  });
+
+  it("公式格显示计算值,选中后公式栏回显原始公式,元信息给出公式数", async () => {
+    // A1 表头、A2 是公式格,显示计算值 14,原始公式 =B2*C2
+    parseCsvFile.mockResolvedValue(
+      successOutcome([["小计"], ["14"]], {}, { "1,0": "=B2*C2" }) as never,
+    );
+    render(<ExcelPage />);
+    await upload();
+    const canvas = await screen.findByTestId("sheet-canvas");
+
+    // 元信息显示公式数
+    expect(screen.getByTestId("sheet-meta")).toHaveTextContent("1 个已求值");
+
+    // 初始选中 A1(表头),公式栏显示其文本,不带公式徽标
+    const bar = screen.getByTestId("formula-bar");
+    expect(bar).toHaveTextContent("A1");
+    expect(bar).toHaveTextContent("小计");
+
+    // 下移到 A2(公式格),公式栏回显原始公式
+    canvas.focus();
+    await userEvent.setup().keyboard("{ArrowDown}");
+    expect(bar).toHaveTextContent("A2");
+    expect(bar).toHaveTextContent("=B2*C2");
+  });
+
+  it("加载公式示例按钮走同一条打开流程", async () => {
+    parseCsvFile.mockResolvedValue(successOutcome(makeGrid(8, 4)) as never);
+    render(<ExcelPage />);
+    await userEvent.setup().click(screen.getByTestId("load-formula-sample"));
+    expect(await screen.findByTestId("sheet-canvas")).toBeInTheDocument();
+    // 打开流程确实被触发
+    expect(parseCsvFile).toHaveBeenCalledTimes(1);
   });
 
   it("编码有损时提示内容可能不准确", async () => {

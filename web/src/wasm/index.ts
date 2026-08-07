@@ -10,7 +10,7 @@ import init, {
   WasmSheet,
 } from "./pkg/office_wasm.js";
 import { getLogLevel, onLogLevelChange } from "../apps/shared/logger";
-import type { CellWindowData, SheetHandle, SheetMeta } from "../apps/shared/sheet";
+import type { CellFormula, CellWindowData, SheetHandle, SheetMeta } from "../apps/shared/sheet";
 
 /** 识别出的格式,与 Rust 端 `Format` 对应。 */
 export type OfficeFormat = "docx" | "xlsx" | "pptx" | "csv" | "unknown";
@@ -38,6 +38,20 @@ export interface PackedSheetTransfer {
   colWidthUnits: Uint32Array;
   cols: number;
   meta: SheetMeta;
+  /** 公式单元格清单(可跨线程结构化克隆的小数组)。无公式时为空。 */
+  formulas: CellFormula[];
+}
+
+/**
+ * 当前时刻的 Excel 序列数,注入给公式 `TODAY`/`NOW`。
+ *
+ * Excel 用「1899-12-30 以来的天数 + 当天时间比例」表示时间,1970-01-01 = 25569。
+ * 这里换算到**本地时区**,让 `TODAY()` 与用户日历一致。
+ */
+export function nowSerial(): number {
+  const now = new Date();
+  const localMs = now.getTime() - now.getTimezoneOffset() * 60000;
+  return localMs / 86_400_000 + 25569;
 }
 
 let initialized: Promise<unknown> | null = null;
@@ -83,12 +97,14 @@ export async function parseCsv(
   delimiter = 0,
 ): Promise<PackedSheetTransfer> {
   await ensureReady();
-  const packed = parseCsvPacked(bytes, traceId, delimiter);
+  const packed = parseCsvPacked(bytes, traceId, delimiter, nowSerial());
   try {
-    // 先取元信息,再把缓冲「移出」—— take* 之后缓冲就空了
+    // 先取元信息与公式,再把缓冲「移出」—— take* 之后缓冲就空了
     const meta = packed.meta as SheetMeta;
+    const formulas = packed.formulas as CellFormula[];
     return {
       meta,
+      formulas,
       cols: packed.cols,
       text: packed.takeText(),
       cellEnds: packed.takeCellEnds(),
@@ -116,10 +132,17 @@ export async function sheetFromPacked(packed: PackedSheetTransfer): Promise<Shee
     packed.colWidthUnits,
   );
 
+  // 公式清单转成 Map,按 "row,col" 键 O(1) 查询,供公式栏回显
+  const formulaMap = new Map<string, string>();
+  for (const f of packed.formulas) {
+    formulaMap.set(`${f.row},${f.col}`, f.formula);
+  }
+
   return {
     rows: inner.rows,
     cols: inner.cols,
     colWidthUnits: inner.colWidthUnits(),
+    formulaCount: formulaMap.size,
     window(row0: number, row1: number, col0: number, col1: number): CellWindowData {
       const window = inner.window(row0, row1, col0, col1);
       try {
@@ -130,6 +153,9 @@ export async function sheetFromPacked(packed: PackedSheetTransfer): Promise<Shee
       } finally {
         window.free();
       }
+    },
+    formula(row: number, col: number): string | null {
+      return formulaMap.get(`${row},${col}`) ?? null;
     },
     dispose() {
       inner.free();

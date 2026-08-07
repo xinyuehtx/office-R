@@ -45,6 +45,13 @@ export interface CellWindowData {
   cols: number;
 }
 
+/** 一个公式单元格:0 基下标 + 原始公式文本(含前导 `=`)。 */
+export interface CellFormula {
+  row: number;
+  col: number;
+  formula: string;
+}
+
 /** 只读表格句柄。 */
 export interface SheetHandle {
   /** 行数。 */
@@ -55,6 +62,15 @@ export interface SheetHandle {
   readonly colWidthUnits: Uint32Array;
   /** 取 `[row0, row1) × [col0, col1)` 区域的单元格文本。入参越界会被夹紧。 */
   window(row0: number, row1: number, col0: number, col1: number): CellWindowData;
+  /**
+   * 若 `(row, col)` 是公式单元格,返回其原始公式(含 `=`);否则 `null`。
+   *
+   * 单元格里显示的是**计算值**([`window`] 取到的),公式栏用它回显**原始公式** ——
+   * 与 Excel 「格显示值、栏显示式」一致。表格无公式时可不实现。
+   */
+  formula?(row: number, col: number): string | null;
+  /** 公式单元格总数(无公式为 0);用于页面提示。 */
+  readonly formulaCount?: number;
   /** 释放底层资源(WASM 线性内存里的表格)。 */
   dispose(): void;
 }

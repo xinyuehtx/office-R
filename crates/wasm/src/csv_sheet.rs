@@ -38,6 +38,8 @@ pub struct PackedCsv {
     cols: u32,
     meta: CsvMeta,
     parse_ms: f64,
+    /// 公式单元格清单(row, col, 原始文本),供公式栏回显。空表示本文件无公式。
+    formulas: Vec<office_core::formula::CellFormula>,
 }
 
 #[wasm_bindgen]
@@ -76,6 +78,23 @@ impl PackedCsv {
     #[wasm_bindgen(getter)]
     pub fn meta(&self) -> Result<JsValue, JsValue> {
         meta_to_js(&self.meta, self.parse_ms)
+    }
+
+    /// 公式单元格清单,序列化为 `[{row, col, formula}, ...]`(0 基下标)。
+    ///
+    /// 公式的原始文本会展示在公式栏,是**用户自己写的公式**、不涉及其它单元格内容,
+    /// 因此可安全跨边界传递。
+    #[wasm_bindgen(getter)]
+    pub fn formulas(&self) -> Result<JsValue, JsValue> {
+        let array = js_sys::Array::new();
+        for f in &self.formulas {
+            let obj = js_sys::Object::new();
+            js_sys::Reflect::set(&obj, &"row".into(), &JsValue::from_f64(f.row as f64))?;
+            js_sys::Reflect::set(&obj, &"col".into(), &JsValue::from_f64(f.col as f64))?;
+            js_sys::Reflect::set(&obj, &"formula".into(), &JsValue::from_str(&f.source))?;
+            array.push(&obj);
+        }
+        Ok(array.into())
     }
 }
 
@@ -184,9 +203,19 @@ impl WasmSheet {
 /// 在 Worker 中解析 CSV,产出可转移的紧凑缓冲。
 ///
 /// `trace_id` 由前端生成,用于把 WASM 与前端的日志串成一次会话。
-/// `delimiter` 传 0 表示自动嗅探。
+/// `delimiter` 传 0 表示自动嗅探。`now_serial` 是注入给公式 `TODAY`/`NOW` 的
+/// 当前时间序列数(前端用 `Date` 换算;传 0 表示不需要)。
+///
+/// 若 CSV 里含有以 `=` 开头的**公式**单元格,这里会在内核侧求值,产出的紧凑缓冲
+/// 里公式格是**计算结果**(与 Excel 「单元格显示值」一致),原始公式经 [`PackedCsv::formulas`]
+/// 单独回传给公式栏。没有公式时零额外开销,行为与旧版完全一致。
 #[wasm_bindgen(js_name = parseCsvPacked)]
-pub fn parse_csv_packed(bytes: &[u8], trace_id: &str, delimiter: u8) -> Result<PackedCsv, JsValue> {
+pub fn parse_csv_packed(
+    bytes: &[u8],
+    trace_id: &str,
+    delimiter: u8,
+    now_serial: f64,
+) -> Result<PackedCsv, JsValue> {
     let started = log::now_ms();
     let options = CsvOptions {
         delimiter: (delimiter != 0).then_some(delimiter),
@@ -212,23 +241,32 @@ pub fn parse_csv_packed(bytes: &[u8], trace_id: &str, delimiter: u8) -> Result<P
 
     let parse_ms = log::now_ms() - started;
     let meta = document.meta.clone();
+
+    // 求值公式(如有)。得到 Some 则用计算后的显示表,否则沿用原表。
+    let (sheet, formulas) = match office_core::formula::evaluate_sheet(&document.sheet, now_serial)
+    {
+        Some(grid) => (grid.display, grid.formulas),
+        None => (document.sheet, Vec::new()),
+    };
+
     log::log(
         Level::Info,
         trace_id,
         "csv.parse.ok",
         &format!(
-            "bytes={} rows={} cols={} encoding={} delimiter={:?} truncated={} ms={:.1}",
+            "bytes={} rows={} cols={} encoding={} delimiter={:?} truncated={} formulas={} ms={:.1}",
             bytes.len(),
             meta.rows,
             meta.cols,
             meta.encoding,
             meta.delimiter as char,
             meta.truncated_rows || meta.truncated_cols,
+            formulas.len(),
             parse_ms
         ),
     );
 
-    let packed = document.sheet.into_packed();
+    let packed = sheet.into_packed();
     Ok(PackedCsv {
         text: packed.text,
         cell_ends: packed.cell_ends,
@@ -237,6 +275,7 @@ pub fn parse_csv_packed(bytes: &[u8], trace_id: &str, delimiter: u8) -> Result<P
         cols: packed.cols,
         meta,
         parse_ms,
+        formulas,
     })
 }
 

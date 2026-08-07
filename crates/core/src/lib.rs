@@ -9,15 +9,19 @@
 //! - [`csv::parse`]:把 CSV 解析成 [`sheet::Sheet`],供视图层做表格渲染 ——
 //!   这是本期 Excel 切片的主路径。
 //!
-//! # 扩展边界(本期不实现)
+//! - [`formula`]:**公式计算引擎**([`Workbook`])—— [`sheet::Sheet`] 之上独立的
+//!   「值/公式层」,把 `=SUM(A1:A10)` 这类公式解析并求值,语义对齐 Excel。
 //!
-//! 公式求值、数字/日期格式化、图表都**不在** [`sheet::Sheet`] 里:
-//! 它只承载「纯文本单元格」。将来接入 xlsx 时应在其之上新增独立的值层 /
-//! 格式层,而不是把这些概念混进表格模型。详见 `docs/architecture.md`。
+//! # 扩展边界
+//!
+//! [`sheet::Sheet`] 保持**只读纯文本**:公式求值在独立的 [`formula`] 模块,
+//! 数字/日期格式化、图表仍未实现。新增能力一律在 `Sheet` 之上叠层,
+//! 而不是把这些概念混进表格模型。详见 `docs/architecture.md`。
 
 pub mod csv;
 pub mod excel;
 pub mod format;
+pub mod formula;
 pub mod ppt;
 pub mod render;
 pub mod sheet;
@@ -25,6 +29,7 @@ pub mod word;
 
 pub use csv::{CsvDocument, CsvError, CsvMeta, CsvOptions};
 pub use format::{detect_format, Format};
+pub use formula::{Value as FormulaValue, Workbook};
 pub use render::RenderResult;
 pub use sheet::{CellWindow, PackedSheet, Sheet, SheetError};
 

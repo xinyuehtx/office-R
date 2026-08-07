@@ -5,6 +5,20 @@ import { SheetCanvas } from "./SheetCanvas";
 /** 本期支持的扩展名。xlsx 的表格渲染留待后续切片。 */
 const ACCEPT = ".csv,.tsv,.txt";
 
+/**
+ * 内置公式示例:以 `=` 开头的单元格会被 Rust/WASM 公式引擎求值,
+ * 表格显示计算结果,选中后公式栏回显原始公式。
+ */
+const FORMULA_SAMPLE = `商品,单价,数量,小计
+苹果,3.5,4,=B2*C2
+香蕉,2,6,=B3*C3
+橙子,4.2,3,=B4*C4
+合计,,=SUM(C2:C4),=SUM(D2:D4)
+均价,=AVERAGE(B2:B4),,
+最高价,=MAX(B2:B4),,
+满减,=IF(D5>30,"满30打折","未满30"),,
+`;
+
 /** 把字节数格式化成人类可读的大小。 */
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -15,25 +29,40 @@ function formatBytes(bytes: number): string {
 /**
  * 表格(Excel)页面。
  *
- * 本期范围:**只做 CSV 的只读视图渲染**。
- * 公式求值、数字/日期格式化、图表都不在范围内 —— CSV 本身也不携带这些信息。
+ * 上传 CSV → canvas 表格视图。以 `=` 开头的单元格会被 **Rust/WASM 公式引擎**求值,
+ * 显示计算结果(选中后公式栏回显原始公式),语义对齐 Excel。
  */
 export function ExcelPage() {
   const { state, openFile, reset } = useCsvFile();
   const busy = state.status === "reading" || state.status === "parsing";
+
+  /** 载入内置公式示例(构造成一个 File 走同一条打开流程)。 */
+  const openSample = () => {
+    const file = new File([FORMULA_SAMPLE], "公式示例.csv", { type: "text/csv" });
+    void openFile(file);
+  };
 
   return (
     <section className="office-page office-page--sheet" aria-label="表格 · Excel">
       <header className="office-page__header">
         <h2>表格 · Excel</h2>
         <p className="office-page__subtitle">
-          上传 CSV 文件,在 canvas 上查看表格视图。解析与列切分由 Rust/WASM 内核完成,
-          支持自动识别编码与分隔符。本期仅支持 CSV,不含公式、格式化与图表。
+          上传 CSV 文件,在 canvas 上查看表格视图。解析、列切分与**公式求值**都由
+          Rust/WASM 内核完成,支持自动识别编码与分隔符。写在单元格里以 <code>=</code>{" "}
+          开头的公式(如 <code>=SUM(A1:A10)</code>)会像 Excel 一样算出结果。
         </p>
       </header>
 
       <div className="office-page__upload">
         <FileUpload accept={ACCEPT} onFile={openFile} label="上传 CSV 文件" />
+        <button
+          type="button"
+          className="office-page__link"
+          onClick={openSample}
+          data-testid="load-formula-sample"
+        >
+          加载公式示例
+        </button>
         {state.fileName && (
           <span className="office-page__filename">
             {state.fileName}
@@ -71,6 +100,10 @@ export function ExcelPage() {
           <ul className="office-page__hint">
             <li>支持 UTF-8 / UTF-16 / GBK 等编码,带不带 BOM 都可以。</li>
             <li>分隔符自动识别:逗号、分号、制表符、竖线。</li>
+            <li>
+              以 <code>=</code> 开头的单元格按 Excel 公式求值,支持 SUM/IF/VLOOKUP/DATE 等
+              140+ 函数。点「加载公式示例」试试。
+            </li>
             <li>滚轮或拖拽平移,Ctrl(⌘)加滚轮以指针为中心缩放,方向键移动选区。</li>
           </ul>
         </div>
@@ -103,6 +136,15 @@ export function ExcelPage() {
                 <span className="office-page__warn">已达上限,超出部分未显示</span>
               )}
             </dd>
+            {state.sheet.formulaCount ? (
+              <>
+                <dt>公式</dt>
+                <dd>
+                  {state.sheet.formulaCount.toLocaleString()} 个已求值
+                  <span className="office-page__muted">选中公式格,公式栏显示原始公式</span>
+                </dd>
+              </>
+            ) : null}
             {state.metrics && (
               <>
                 <dt>耗时</dt>

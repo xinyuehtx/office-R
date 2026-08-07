@@ -26,8 +26,11 @@ function displayWidth(text: string): number {
   return width;
 }
 
-/** 由二维数组构造一个 `SheetHandle`。 */
-export function createFixtureSheet(rows: string[][]): SheetHandle & { disposed: boolean } {
+/** 由二维数组构造一个 `SheetHandle`。可选 `formulas` 提供公式格回显。 */
+export function createFixtureSheet(
+  rows: string[][],
+  formulas: Record<string, string> = {},
+): SheetHandle & { disposed: boolean } {
   const rowCount = rows.length;
   const colCount = rows.reduce((max, row) => Math.max(max, row.length), 0);
 
@@ -45,6 +48,10 @@ export function createFixtureSheet(rows: string[][]): SheetHandle & { disposed: 
     cols: colCount,
     colWidthUnits,
     disposed: false,
+    formulaCount: Object.keys(formulas).length,
+    formula(row: number, col: number): string | null {
+      return formulas[`${row},${col}`] ?? null;
+    },
     window(row0: number, row1: number, col0: number, col1: number): CellWindowData {
       const r0 = Math.min(Math.max(0, row0), rowCount);
       const r1 = Math.min(Math.max(r0, row1), rowCount);
