@@ -51,7 +51,9 @@ import {
   clampScroll,
   computeLayout,
   computeVisibleRange,
+  colAtOffset,
   hitTest,
+  rowAtOffset,
   scrollIntoView,
   scrollFromThumbOffset,
   scrollbarGeometry,
@@ -65,8 +67,10 @@ import {
   type Viewport,
 } from "./geometry";
 import {
+  cellTextAt,
   paintBody,
   paintEmptyState,
+  paintFrozenBody,
   paintHeaders,
   paintOverlay,
   TextFitter,
@@ -215,6 +219,9 @@ export class GridRenderer {
   private sheet: SheetHandle | null = null;
   /** 可视行 → 行头显示文本;过滤时映射到原始行号,否则即 `可视行 + 1`。 */
   private rowLabelText: (visualRow: number) => string = (r) => String(r + 1);
+  /** 冻结的顶部行数 / 左侧列数(0 表示不冻结)。 */
+  private frozenRows = 0;
+  private frozenCols = 0;
   private layout: GridLayout = computeLayout({ rows: 0, cols: 0, colWidthUnits: [], zoom: 1 });
 
   /** 设备像素比。 */
@@ -358,6 +365,25 @@ export class GridRenderer {
       row: Math.min(Math.max(0, cur.row), Math.max(0, rows - 1)),
       col: Math.min(Math.max(0, cur.col), Math.max(0, cols - 1)),
     };
+  }
+
+  /** 设置冻结:顶部 `rows` 行、左侧 `cols` 列。传 0 取消对应方向的冻结。 */
+  setFrozen(rows: number, cols: number): void {
+    const r = Math.max(0, Math.floor(rows));
+    const c = Math.max(0, Math.floor(cols));
+    if (r === this.frozenRows && c === this.frozenCols) return;
+    this.frozenRows = r;
+    this.frozenCols = c;
+    // 冻结改变了 body 画布用途(瓦片 ↔ 全量),重置滚动与瓦片,重算布局
+    this.scroll = { x: 0, y: 0 };
+    this.tile = null;
+    this.windowCache = null;
+    this.invalidateLayout();
+  }
+
+  /** 当前冻结设置。 */
+  getFrozen(): { rows: number; cols: number } {
+    return { rows: this.frozenRows, cols: this.frozenCols };
   }
 
   /**
@@ -629,6 +655,8 @@ export class GridRenderer {
       // 内部按设备像素工作,所以把 dpr 并进缩放系数
       zoom: this.zoom * this.dpr,
       snap: true,
+      frozenRows: this.frozenRows,
+      frozenCols: this.frozenCols,
     });
     this.layoutDirty = false;
     this.scroll = clampScroll(this.layout, this.viewport, this.scroll);
@@ -686,8 +714,12 @@ export class GridRenderer {
     // ① 几何:表头要知道可见了哪些行列(单元格取数按瓦片来,见 updateBodyLayer)
     const range = computeVisibleRange(layout, viewport, this.scroll, 1);
 
-    // ② 单元格层:能靠 GPU 平移就不画
-    this.updateBodyLayer(body);
+    // ② 单元格层:能靠 GPU 平移就不画;冻结时走全量四象限重绘
+    if (this.layout.frozenRows > 0 || this.layout.frozenCols > 0) {
+      this.renderFrozenBody(body);
+    } else {
+      this.updateBodyLayer(body);
+    }
 
     // ③ 表头与覆盖层:便宜,但也只在脏的时候画
     if (this.dirty.headers) {
@@ -753,6 +785,73 @@ export class GridRenderer {
     clip.style.top = `${layout.headerHeight / this.dpr}px`;
     clip.style.width = `${body.width / this.dpr}px`;
     clip.style.height = `${body.height / this.dpr}px`;
+  }
+
+  /**
+   * 冻结模式的单元格层:body 画布铺满单元格区域,四象限全量重绘(见 `paintFrozenBody`)。
+   *
+   * 不走瓦片/GPU 平移 —— 冻结是低频审阅态,全量重绘足够流畅且无回归风险。
+   * 从 sheet 按四个象限分别取窗口(都被视口夹小),`getCell` 按坐标选对应窗口。
+   */
+  private renderFrozenBody(body: Viewport): void {
+    const layer = this.layers.body;
+    if (!layer || !this.sheet) return;
+    const layout = this.layout;
+
+    // body 画布铺满单元格区域(丢弃瓦片语义)
+    if (layer.canvas.width !== body.width || layer.canvas.height !== body.height) {
+      layer.canvas.width = body.width;
+      layer.canvas.height = body.height;
+    }
+    layer.canvas.style.width = `${body.width / this.dpr}px`;
+    layer.canvas.style.height = `${body.height / this.dpr}px`;
+    layer.canvas.style.transform = "translate3d(0,0,0)";
+    this.tile = null;
+
+    // 可见的滚动行列范围(在冻结带之后)
+    const sRow0 = Math.min(
+      layout.rows,
+      Math.max(layout.frozenRows, rowAtOffset(layout, this.scroll.y + layout.frozenHeight)),
+    );
+    const sRow1 = Math.min(layout.rows, rowAtOffset(layout, this.scroll.y + body.height - 1) + 1);
+    const sCol0 = Math.min(
+      layout.cols,
+      Math.max(layout.frozenCols, colAtOffset(layout, this.scroll.x + layout.frozenWidth)),
+    );
+    const sCol1 = Math.min(layout.cols, colAtOffset(layout, this.scroll.x + body.width - 1) + 1);
+
+    // 四象限窗口(都被视口夹小),合成 getCell
+    const fetch = (r0: number, r1: number, c0: number, c1: number): CellTextSource | null => {
+      if (r1 <= r0 || c1 <= c0) return null;
+      const data = this.sheet!.window(r0, r1, c0, c1);
+      this.stats.windowFetches += 1;
+      return { range: { row0: r0, row1: r1, col0: c0, col1: c1 }, cells: flattenWindow(data) };
+    };
+    const main = fetch(sRow0, sRow1, sCol0, sCol1);
+    const top = fetch(0, layout.frozenRows, sCol0, sCol1);
+    const left = fetch(sRow0, sRow1, 0, layout.frozenCols);
+    const corner = fetch(0, layout.frozenRows, 0, layout.frozenCols);
+    const sources = [main, top, left, corner].filter((s): s is CellTextSource => s !== null);
+    const getCell = (row: number, col: number): string => {
+      for (const s of sources) {
+        if (row >= s.range.row0 && row < s.range.row1 && col >= s.range.col0 && col < s.range.col1) {
+          return cellTextAt(s, row, col);
+        }
+      }
+      return "";
+    };
+
+    paintFrozenBody(layer.ctx, {
+      layout,
+      body,
+      scroll: this.scroll,
+      getCell,
+      fitter: this.fitter,
+      visible: { row0: sRow0, row1: sRow1, col0: sCol0, col1: sCol1 },
+    });
+    this.stats.layerPaints.body += 1;
+    this.stats.fullRepaints += 1;
+    this.dirty.body = false;
   }
 
   /**

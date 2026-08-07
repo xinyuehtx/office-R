@@ -74,6 +74,14 @@ export interface GridLayout {
   totalWidth: number;
   /** 内容总高度。 */
   totalHeight: number;
+  /** 冻结的顶部行数(这些行不随纵向滚动)。 */
+  frozenRows: number;
+  /** 冻结的左侧列数(这些列不随横向滚动)。 */
+  frozenCols: number;
+  /** 冻结列的像素总宽(`colOffsets[frozenCols]`)。 */
+  frozenWidth: number;
+  /** 冻结行的像素总高(`frozenRows * rowHeight`)。 */
+  frozenHeight: number;
 }
 
 /** 可见区域(半开区间 `[row0, row1)` × `[col0, col1)`)。 */
@@ -99,6 +107,10 @@ export interface LayoutInput {
    * 不会重采样发虚。
    */
   snap?: boolean;
+  /** 冻结顶部行数(默认 0)。 */
+  frozenRows?: number;
+  /** 冻结左侧列数(默认 0)。 */
+  frozenCols?: number;
 }
 
 /**
@@ -113,6 +125,8 @@ export function computeLayout({
   colWidthUnits,
   zoom,
   snap = false,
+  frozenRows = 0,
+  frozenCols = 0,
 }: LayoutInput): GridLayout {
   const safeZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
   const safeCols = Math.max(0, Math.floor(cols));
@@ -137,6 +151,10 @@ export function computeLayout({
     ),
   );
 
+  // 冻结数量夹到有效范围(不能冻结超过总行列)
+  const fRows = Math.max(0, Math.min(Math.floor(frozenRows), safeRows));
+  const fCols = Math.max(0, Math.min(Math.floor(frozenCols), safeCols));
+
   return {
     rows: safeRows,
     cols: safeCols,
@@ -149,6 +167,10 @@ export function computeLayout({
     colOffsets,
     totalWidth: colOffsets[safeCols] ?? 0,
     totalHeight: rowHeight * safeRows,
+    frozenRows: fRows,
+    frozenCols: fCols,
+    frozenWidth: colOffsets[fCols] ?? 0,
+    frozenHeight: fRows * rowHeight,
   };
 }
 
@@ -279,6 +301,27 @@ export function cellRect(layout: GridLayout, row: number, col: number): Rect {
   };
 }
 
+/**
+ * 单元格在**视口坐标**下的矩形(含表头偏移、考虑冻结)。
+ *
+ * 冻结行 / 列**不随对应轴滚动**:落在冻结区的单元格用 0 滚动定位,
+ * 其余按 `内容 - 滚动` 定位。用于覆盖层(选中/悬停)在冻结存在时也画对位置。
+ */
+export function cellScreenRect(
+  layout: GridLayout,
+  scroll: Scroll,
+  row: number,
+  col: number,
+): Rect {
+  const colLeft = layout.colOffsets[col] ?? 0;
+  const width = (layout.colOffsets[col + 1] ?? 0) - colLeft;
+  const frozenCol = col < layout.frozenCols;
+  const frozenRow = row < layout.frozenRows;
+  const x = layout.headerWidth + colLeft - (frozenCol ? 0 : scroll.x);
+  const y = layout.headerHeight + row * layout.rowHeight - (frozenRow ? 0 : scroll.y);
+  return { x, y, width, height: layout.rowHeight };
+}
+
 /** 视口中命中的目标区域。 */
 export type HitTarget =
   | { kind: "cell"; row: number; col: number }
@@ -310,32 +353,32 @@ export function hitTest(
 
   if (inColHeader) {
     if (layout.cols === 0) return { kind: "outside" };
-    const contentX = x - layout.headerWidth + scroll.x;
-    if (contentX >= layout.totalWidth) return { kind: "outside" };
-    return { kind: "column-header", col: colAtOffset(layout, contentX) };
+    const inFrozenCol = x - layout.headerWidth < layout.frozenWidth;
+    const cx = inFrozenCol ? x - layout.headerWidth : x - layout.headerWidth + scroll.x;
+    if (cx >= layout.totalWidth) return { kind: "outside" };
+    return { kind: "column-header", col: colAtOffset(layout, cx) };
   }
 
   if (inRowHeader) {
     if (layout.rows === 0) return { kind: "outside" };
-    const contentY = y - layout.headerHeight + scroll.y;
-    if (contentY >= layout.totalHeight) return { kind: "outside" };
-    return { kind: "row-header", row: rowAtOffset(layout, contentY) };
+    const inFrozenRow = y - layout.headerHeight < layout.frozenHeight;
+    const cy = inFrozenRow ? y - layout.headerHeight : y - layout.headerHeight + scroll.y;
+    if (cy >= layout.totalHeight) return { kind: "outside" };
+    return { kind: "row-header", row: rowAtOffset(layout, cy) };
   }
 
-  const contentX = x - layout.headerWidth + scroll.x;
-  const contentY = y - layout.headerHeight + scroll.y;
-  if (
-    layout.rows === 0 ||
-    layout.cols === 0 ||
-    contentX >= layout.totalWidth ||
-    contentY >= layout.totalHeight
-  ) {
+  // 冻结区不随对应轴滚动:落在冻结带里的坐标用「不含滚动」的内容坐标定位
+  const inFrozenCol = x - layout.headerWidth < layout.frozenWidth;
+  const inFrozenRow = y - layout.headerHeight < layout.frozenHeight;
+  const cx = inFrozenCol ? x - layout.headerWidth : x - layout.headerWidth + scroll.x;
+  const cy = inFrozenRow ? y - layout.headerHeight : y - layout.headerHeight + scroll.y;
+  if (layout.rows === 0 || layout.cols === 0 || cx >= layout.totalWidth || cy >= layout.totalHeight) {
     return { kind: "outside" };
   }
   return {
     kind: "cell",
-    row: rowAtOffset(layout, contentY),
-    col: colAtOffset(layout, contentX),
+    row: rowAtOffset(layout, cy),
+    col: colAtOffset(layout, cx),
   };
 }
 

@@ -3,6 +3,7 @@ import {
   anchoredScroll,
   bodySize,
   cellRect,
+  cellScreenRect,
   clampScroll,
   colAtOffset,
   computeLayout,
@@ -404,5 +405,67 @@ describe("cellRect / rectContains", () => {
     expect(rectContains(rect, 10, 10)).toBe(true);
     expect(rectContains(rect, 30, 30)).toBe(true);
     expect(rectContains(rect, 31, 30)).toBe(false);
+  });
+});
+
+describe("冻结行列(freeze panes)", () => {
+  function frozenLayout(rows = 100, cols = 6, fr = 1, fc = 2): GridLayout {
+    return computeLayout({
+      rows,
+      cols,
+      colWidthUnits: new Uint32Array(cols).fill(1),
+      zoom: 1,
+      frozenRows: fr,
+      frozenCols: fc,
+    });
+  }
+
+  it("computeLayout 记录冻结行列与像素跨度", () => {
+    const layout = frozenLayout(100, 6, 1, 2);
+    expect(layout.frozenRows).toBe(1);
+    expect(layout.frozenCols).toBe(2);
+    expect(layout.frozenHeight).toBe(layout.rowHeight);
+    expect(layout.frozenWidth).toBe(layout.colOffsets[2]);
+  });
+
+  it("冻结数量被夹到总行列内", () => {
+    const layout = computeLayout({
+      rows: 3,
+      cols: 2,
+      colWidthUnits: new Uint32Array(2).fill(1),
+      zoom: 1,
+      frozenRows: 99,
+      frozenCols: 99,
+    });
+    expect(layout.frozenRows).toBe(3);
+    expect(layout.frozenCols).toBe(2);
+  });
+
+  it("cellScreenRect:冻结区不随对应轴滚动,其余减去滚动", () => {
+    const layout = frozenLayout(100, 6, 1, 2);
+    const scroll = { x: 100, y: 50 };
+    // 冻结单元格(0,0):双向不滚,固定在表头右下角
+    const frozenCell = cellScreenRect(layout, scroll, 0, 0);
+    expect(frozenCell.x).toBe(layout.headerWidth);
+    expect(frozenCell.y).toBe(layout.headerHeight);
+    // 滚动单元格:两轴都减滚动
+    const scrollCell = cellScreenRect(layout, scroll, 5, 4);
+    expect(scrollCell.x).toBe(layout.headerWidth + layout.colOffsets[4] - scroll.x);
+    expect(scrollCell.y).toBe(layout.headerHeight + 5 * layout.rowHeight - scroll.y);
+    // 冻结列 + 滚动行:x 不滚、y 滚
+    const leftBand = cellScreenRect(layout, scroll, 5, 1);
+    expect(leftBand.x).toBe(layout.headerWidth + layout.colOffsets[1]);
+    expect(leftBand.y).toBe(layout.headerHeight + 5 * layout.rowHeight - scroll.y);
+  });
+
+  it("hitTest:冻结带内的点映射到冻结行列(忽略滚动)", () => {
+    const layout = frozenLayout(100, 6, 1, 2);
+    const scroll = { x: 300, y: 200 };
+    // 点在冻结列带内(x 落在第 0 列),即便已横向滚动,也应命中第 0 列
+    const x = layout.headerWidth + 1;
+    const y = layout.headerHeight + layout.frozenHeight + 1;
+    const hit = hitTest(layout, VIEWPORT, scroll, x, y);
+    expect(hit.kind).toBe("cell");
+    if (hit.kind === "cell") expect(hit.col).toBe(0);
   });
 });

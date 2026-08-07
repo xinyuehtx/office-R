@@ -23,6 +23,7 @@ pub mod excel;
 pub mod filter;
 pub mod format;
 pub mod formula;
+pub mod numfmt;
 pub mod ppt;
 pub mod render;
 pub mod sheet;

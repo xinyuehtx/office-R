@@ -48,6 +48,7 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
   const [zoom, setZoom] = useState(1);
   const [stats, setStats] = useState<RendererStats | null>(null);
   const [filters, setFilters] = useState<Map<number, FilterSpec>>(new Map());
+  const [frozen, setFrozen] = useState({ rows: 0, cols: 0 });
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
 
@@ -117,6 +118,20 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
     setFilters(new Map());
     setZoom(renderer.getZoom());
     renderer.requestFrame();
+  }, [sheet]);
+
+  // 冻结变化:推给渲染器(重置滚动、切换到四象限绘制)
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) return;
+    renderer.setFrozen(frozen.rows, frozen.cols);
+    setSelection((prev) => ({ ...prev }));
+    renderer.requestFrame();
+  }, [frozen]);
+
+  // 换数据时重置冻结
+  useEffect(() => {
+    setFrozen({ rows: 0, cols: 0 });
   }, [sheet]);
 
   // 过滤变化:在 WASM 侧重算命中行,再让渲染器按新行集刷新(保留滚动/缩放)
@@ -396,6 +411,39 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
           onClearAll={clearAllFilters}
         />
       )}
+
+      <div className="sheet__freeze-bar" data-testid="freeze-bar">
+        <span className="sheet__freeze-title">冻结</span>
+        <button type="button" onClick={() => setFrozen({ rows: 1, cols: frozen.cols })}>
+          冻结首行
+        </button>
+        <button type="button" onClick={() => setFrozen({ rows: frozen.rows, cols: 1 })}>
+          冻结首列
+        </button>
+        <button
+          type="button"
+          data-testid="freeze-to-selection"
+          onClick={() => setFrozen({ rows: selection.row, cols: selection.col })}
+          title="冻结选中单元格左上方的所有行列"
+        >
+          冻结到选区
+        </button>
+        {(frozen.rows > 0 || frozen.cols > 0) && (
+          <>
+            <span className="sheet__freeze-state" data-testid="freeze-state">
+              已冻结 {frozen.rows} 行 / {frozen.cols} 列
+            </span>
+            <button
+              type="button"
+              className="sheet__filter-link"
+              data-testid="freeze-clear"
+              onClick={() => setFrozen({ rows: 0, cols: 0 })}
+            >
+              取消冻结
+            </button>
+          </>
+        )}
+      </div>
 
       {/* 公式栏:左侧显示当前地址,右侧显示原始公式(公式格)或计算值 */}
       <div className="sheet__formula-bar" data-testid="formula-bar">
