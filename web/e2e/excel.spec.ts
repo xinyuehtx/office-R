@@ -63,4 +63,27 @@ test.describe("Excel 只读:公式 / 过滤 / 冻结", () => {
     await page.getByTestId("sheet-tab-1").click();
     await expect(canvas).toBeVisible();
   });
+
+  test("排序 + 区域选择 + 复制", async ({ page }) => {
+    await gotoTab(page, "表格");
+    await upload(page, "sample.csv");
+    const canvas = page.getByTestId("sheet-canvas");
+    await expect(canvas).toBeVisible();
+
+    // 选到 B 列后升序排序 → 出现「取消排序」
+    await canvas.click();
+    await page.keyboard.press("ArrowRight");
+    await page.getByTestId("sort-asc").click();
+    await expect(page.getByTestId("sort-clear")).toBeVisible();
+
+    // 区域选择:Shift + 方向键扩成 2×2,复制出现反馈
+    await canvas.click();
+    await page.keyboard.down("Shift");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.up("Shift");
+    await expect(page.getByTestId("selection-size")).toContainText("2×2");
+    await page.getByTestId("copy-selection").click();
+    await expect(page.getByTestId("copied-toast")).toBeVisible();
+  });
 });

@@ -106,6 +106,11 @@ export interface SheetHandle {
   filter?(specs: FilterSpec[], headerRows: number): number;
   /** 清除过滤,恢复全量。 */
   clearFilter?(): void;
+  /**
+   * 按某列排序,返回可视行数。`dir` 为 `"asc"`/`"desc"` 排序,`"none"` 取消。
+   * 与过滤复合(排序作用在过滤结果之上);顶部 `headerRows` 行固定置顶。
+   */
+  sort?(col: number, dir: "asc" | "desc" | "none", headerRows: number): number;
   /** 枚举某列唯一值(供值集过滤 UI)。 */
   uniqueValues?(col: number, headerRows: number, limit: number): UniqueValues;
   /** 释放底层资源(WASM 线性内存里的表格)。 */

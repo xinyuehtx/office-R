@@ -192,6 +192,9 @@ function buildSheetHandle(inner: WasmSheet, formulas: CellFormula[]): SheetHandl
     clearFilter(): void {
       inner.clearFilter();
     },
+    sort(col: number, dir: "asc" | "desc" | "none", headerRows: number): number {
+      return inner.sort(col, dir, headerRows);
+    },
     uniqueValues(col: number, headerRows: number, limit: number): UniqueValues {
       return inner.uniqueValues(col, headerRows, limit) as UniqueValues;
     },

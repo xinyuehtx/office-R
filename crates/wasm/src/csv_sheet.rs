@@ -150,10 +150,16 @@ impl CellWindow {
 #[wasm_bindgen]
 pub struct WasmSheet {
     sheet: Sheet,
-    /// 过滤后的「可视行 → 底层行」映射;`None` 表示未过滤(可视行即底层行)。
+    /// 过滤命中的底层行(`None` 表示未过滤)。
+    filter_rows: Option<Vec<u32>>,
+    /// 排序:`(列, 是否升序)`;`None` 表示未排序。
+    sort_spec: Option<(u32, bool)>,
+    /// 最近一次过滤/排序用的表头行数(重建复合映射时复用)。
+    header_rows: u32,
+    /// 过滤 + 排序复合后的「可视行 → 底层行」映射;`None` 表示恒等(可视行即底层行)。
     ///
     /// 关键点:可视行始终是连续的 `0..len`,渲染器的几何(等高行、列前缀和)因此
-    /// **完全复用**,过滤对渲染器透明 —— 只是行头标签要显示底层行号(见 `rowLabel`)。
+    /// **完全复用**,过滤/排序对渲染器透明 —— 只是行头标签要显示底层行号(见 `rowLabel`)。
     row_map: Option<Vec<u32>>,
 }
 
@@ -162,8 +168,33 @@ impl WasmSheet {
     pub(crate) fn from_sheet(sheet: Sheet) -> WasmSheet {
         WasmSheet {
             sheet,
+            filter_rows: None,
+            sort_spec: None,
+            header_rows: 1,
             row_map: None,
         }
+    }
+
+    /// 按当前过滤与排序重建复合行映射。都不生效时 `row_map` 归位为 `None`。
+    fn rebuild(&mut self) {
+        let base: Option<Vec<u32>> = match (&self.filter_rows, self.sort_spec) {
+            (None, None) => None,
+            (Some(f), None) => Some(f.clone()),
+            (filt, Some((col, asc))) => {
+                let base: Vec<u32> = match filt {
+                    Some(f) => f.clone(),
+                    None => (0..self.sheet.rows() as u32).collect(),
+                };
+                Some(office_core::filter::sort_rows(
+                    &self.sheet,
+                    &base,
+                    col,
+                    asc,
+                    self.header_rows,
+                ))
+            }
+        };
+        self.row_map = base;
     }
 }
 
@@ -186,10 +217,7 @@ impl WasmSheet {
             col_width_units,
         };
         Sheet::from_packed(packed)
-            .map(|sheet| WasmSheet {
-                sheet,
-                row_map: None,
-            })
+            .map(WasmSheet::from_sheet)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
@@ -258,15 +286,31 @@ impl WasmSheet {
             filters.push(d.into_core()?);
         }
         let rows = office_core::filter::filter_rows(&self.sheet, &filters, header_rows);
-        let count = rows.len() as u32;
-        self.row_map = Some(rows);
-        Ok(count)
+        self.header_rows = header_rows;
+        self.filter_rows = Some(rows);
+        self.rebuild();
+        Ok(self.rows())
     }
 
-    /// 清除过滤,恢复全量。
+    /// 清除过滤,恢复全量(排序若在,继续保留)。
     #[wasm_bindgen(js_name = clearFilter)]
     pub fn clear_filter(&mut self) {
-        self.row_map = None;
+        self.filter_rows = None;
+        self.rebuild();
+    }
+
+    /// 按第 `col` 列排序:`dir` 为 `"asc"` / `"desc"` 排序,其它值(如 `"none"`)取消排序。
+    ///
+    /// 与过滤复合:排序作用在当前过滤结果之上。返回可视行数。
+    pub fn sort(&mut self, col: u32, dir: &str, header_rows: u32) -> u32 {
+        self.header_rows = header_rows;
+        self.sort_spec = match dir {
+            "asc" => Some((col, true)),
+            "desc" => Some((col, false)),
+            _ => None,
+        };
+        self.rebuild();
+        self.rows()
     }
 
     /// 枚举某列的唯一值(供值集过滤 UI),跳过顶部 `header_rows` 行,最多 `limit` 个。

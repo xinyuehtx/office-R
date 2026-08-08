@@ -235,6 +235,7 @@ export class GridRenderer {
 
   private hover: CellRef | null = null;
   private selection: CellRef | null = null;
+  private selectionRange: { row0: number; row1: number; col0: number; col1: number } | null = null;
 
   /** 当前瓦片;`null` 表示还没画过。 */
   private tile: Tile | null = null;
@@ -513,6 +514,14 @@ export class GridRenderer {
     this.invalidate("headers");
   }
 
+  /** 设置多格选区(已归一化,含首尾);传 `null` 或单格时退化为普通选区。 */
+  setSelectionRange(
+    range: { row0: number; row1: number; col0: number; col1: number } | null,
+  ): void {
+    this.selectionRange = range;
+    this.invalidate("overlay");
+  }
+
   /** 当前选中单元格。 */
   getSelection(): CellRef | null {
     return this.selection;
@@ -752,6 +761,7 @@ export class GridRenderer {
           scroll: this.scroll,
           hover: this.hover,
           selection: this.selection,
+          selectionRange: this.selectionRange,
         });
         this.stats.layerPaints.overlay += 1;
       }

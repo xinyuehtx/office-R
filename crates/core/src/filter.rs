@@ -5,7 +5,8 @@
 //! 用它把「可视行 → 底层行」重映射即可(见 `WasmSheet`),渲染器几何完全复用。
 //!
 //! **约定**:顶部 `header_rows` 行(通常是表头)**始终保留**、不参与条件;
-//! 多列条件按 **AND** 组合(与 Excel 一致);行顺序保持原样(本期不排序)。
+//! 多列条件按 **AND** 组合(与 Excel 一致)。本模块还提供 [`sort_rows`]:在过滤结果
+//! 之上按某列重排(数值感知、空值靠后、稳定),与过滤复合成同一套「可视行 → 底层行」映射。
 
 use crate::sheet::Sheet;
 
@@ -132,6 +133,63 @@ pub fn filter_rows(sheet: &Sheet, filters: &[ColumnFilter], header_rows: u32) ->
         }
     }
     out
+}
+
+/// 对给定的**底层行序列** `base` 按第 `col` 列排序,返回重排后的行序列。
+///
+/// - 顶部 `header_rows`(底层行号 < `header_rows`)**固定置顶**、不参与排序;
+/// - `base` 通常是过滤结果(或全表 `0..rows`),因此**排序与过滤天然复合**;
+/// - 比较是**数值感知**的:两侧都能解析为数才按数值比,否则按文本(忽略大小写);
+/// - 稳定排序:键相等的行保持原有相对顺序。
+pub fn sort_rows(
+    sheet: &Sheet,
+    base: &[u32],
+    col: u32,
+    ascending: bool,
+    header_rows: u32,
+) -> Vec<u32> {
+    let mut headers: Vec<u32> = Vec::new();
+    let mut data: Vec<u32> = Vec::new();
+    for &r in base {
+        if r < header_rows {
+            headers.push(r);
+        } else {
+            data.push(r);
+        }
+    }
+
+    data.sort_by(|&a, &b| {
+        use std::cmp::Ordering;
+        let ca = sheet.cell(a as usize, col as usize);
+        let cb = sheet.cell(b as usize, col as usize);
+        let (ta, tb) = (ca.trim(), cb.trim());
+        // 空值恒排末尾,不随升/降序翻转(与 Excel 一致)
+        match (ta.is_empty(), tb.is_empty()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            _ => {
+                let ord = compare_nonblank(ta, tb);
+                if ascending {
+                    ord
+                } else {
+                    ord.reverse()
+                }
+            }
+        }
+    });
+
+    headers.extend(data);
+    headers
+}
+
+/// 非空单元格比较:两侧都能解析为数则按数值,否则按文本(忽略大小写)。
+fn compare_nonblank(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if let (Ok(na), Ok(nb)) = (a.parse::<f64>(), b.parse::<f64>()) {
+        return na.partial_cmp(&nb).unwrap_or(Ordering::Equal);
+    }
+    a.to_lowercase().cmp(&b.to_lowercase())
 }
 
 /// 枚举某列的**唯一值**(供值集过滤的 UI),跳过顶部 `header_rows` 行。
@@ -309,5 +367,46 @@ mod tests {
             },
         };
         assert_eq!(filter_rows(&s, &[f], 1), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn sort_numeric_ascending_keeps_header() {
+        let s = demo();
+        let base: Vec<u32> = (0..s.rows() as u32).collect();
+        // 按金额升序;空值(广州)排末尾;表头固定第 0 行
+        let out = sort_rows(&s, &base, 1, true, 1);
+        assert_eq!(out[0], 0, "表头固定置顶");
+        let vals: Vec<&str> = out[1..].iter().map(|&r| s.cell(r as usize, 1)).collect();
+        assert_eq!(vals, vec!["800", "1200", "1500", "2000", ""]);
+    }
+
+    #[test]
+    fn sort_descending() {
+        let s = demo();
+        let base: Vec<u32> = (0..s.rows() as u32).collect();
+        let out = sort_rows(&s, &base, 1, false, 1);
+        let vals: Vec<&str> = out[1..].iter().map(|&r| s.cell(r as usize, 1)).collect();
+        // 降序:数值从大到小,空值仍靠后
+        assert_eq!(vals, vec!["2000", "1500", "1200", "800", ""]);
+    }
+
+    #[test]
+    fn sort_text_column() {
+        let s = demo();
+        let base: Vec<u32> = (0..s.rows() as u32).collect();
+        let out = sort_rows(&s, &base, 0, true, 1);
+        let vals: Vec<&str> = out[1..].iter().map(|&r| s.cell(r as usize, 0)).collect();
+        // 文本按 Unicode 码点排序:上(4E0A)<北(5317)<广(5E7F)<深(6DF1)
+        assert_eq!(vals, vec!["上海", "北京", "北京", "广州", "深圳"]);
+    }
+
+    #[test]
+    fn sort_composes_with_filter() {
+        let s = demo();
+        // 先过滤金额 >= 1000,再按金额降序
+        let base = filter_rows(&s, &[num(1, NumOp::Ge, 1000.0)], 1);
+        let out = sort_rows(&s, &base, 1, false, 1);
+        let vals: Vec<&str> = out[1..].iter().map(|&r| s.cell(r as usize, 1)).collect();
+        assert_eq!(vals, vec!["2000", "1500", "1200"]);
     }
 }

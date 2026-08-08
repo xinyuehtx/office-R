@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Tracer } from "../shared/logger";
-import type { FilterSpec, SheetHandle } from "../shared/sheet";
+import { flattenWindow, type FilterSpec, type SheetHandle } from "../shared/sheet";
 import { GridRenderer, type RendererStats } from "./grid/renderer";
 import { wheelToScrollDelta, wheelToZoomFactor } from "./grid/input";
 import { cellAddress } from "./grid/labels";
@@ -45,15 +45,36 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
   const dragRef = useRef<DragMode>({ kind: "none" });
 
   const [selection, setSelection] = useState({ row: 0, col: 0 });
+  /** 选区锚点:范围选择从 anchor 拉到 selection(活动格)。 */
+  const [anchor, setAnchor] = useState({ row: 0, col: 0 });
   const [zoom, setZoom] = useState(1);
   const [stats, setStats] = useState<RendererStats | null>(null);
   const [filters, setFilters] = useState<Map<number, FilterSpec>>(new Map());
   const [frozen, setFrozen] = useState({ rows: 0, cols: 0 });
+  /** 当前排序:列 + 方向;null 表示未排序。 */
+  const [sort, setSort] = useState<{ col: number; dir: "asc" | "desc" } | null>(null);
+  /** 复制反馈(短暂显示「已复制 R×C」)。 */
+  const [copied, setCopied] = useState<string | null>(null);
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
+  const anchorRef = useRef(anchor);
+  anchorRef.current = anchor;
+
+  /** 归一化选区(含首尾)。 */
+  const range = useMemo(
+    () => ({
+      row0: Math.min(anchor.row, selection.row),
+      row1: Math.max(anchor.row, selection.row),
+      col0: Math.min(anchor.col, selection.col),
+      col1: Math.max(anchor.col, selection.col),
+    }),
+    [anchor, selection],
+  );
+  const isMultiSelection = range.row0 !== range.row1 || range.col0 !== range.col1;
 
   /** 该数据源是否支持过滤(WASM 句柄支持,测试替身可能不支持)。 */
   const canFilter = typeof sheet.filter === "function";
+  const canSort = typeof sheet.sort === "function";
 
   /** 选中单元格的文本,用于状态栏与无障碍播报。 */
   const selectedText = useMemo(() => {
@@ -115,7 +136,10 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
     if (!renderer) return;
     renderer.setSheet(sheet);
     setSelection({ row: 0, col: 0 });
+    setAnchor({ row: 0, col: 0 });
     setFilters(new Map());
+    setSort(null);
+    renderer.setSelectionRange(null);
     setZoom(renderer.getZoom());
     renderer.requestFrame();
   }, [sheet]);
@@ -148,8 +172,11 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
 
   // 选区变化同步给渲染器
   useEffect(() => {
-    rendererRef.current?.setSelection(sheet.rows > 0 ? selection : null);
-  }, [selection, sheet]);
+    const renderer = rendererRef.current;
+    if (!renderer) return;
+    renderer.setSelection(sheet.rows > 0 ? selection : null);
+    renderer.setSelectionRange(sheet.rows > 0 ? range : null);
+  }, [selection, range, sheet]);
 
   const clampCell = useCallback(
     (row: number, col: number) => ({
@@ -159,9 +186,14 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
     [sheet],
   );
 
-  /** 移动选区并保证它可见。 */
+  /** 移动 / 扩展选区并保证活动格可见。`extend` 为真时保持锚点(范围选择)。 */
   const moveSelection = useCallback(
-    (deltaRow: number, deltaCol: number, absolute?: { row?: number; col?: number }) => {
+    (
+      deltaRow: number,
+      deltaCol: number,
+      absolute?: { row?: number; col?: number },
+      extend?: boolean,
+    ) => {
       const renderer = rendererRef.current;
       const current = selectionRef.current;
       const next = clampCell(
@@ -169,12 +201,63 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
         absolute?.col ?? current.col + deltaCol,
       );
       setSelection(next);
+      const nextAnchor = extend ? anchorRef.current : next;
+      if (!extend) setAnchor(next);
       if (renderer) {
         renderer.setSelection(next);
+        renderer.setSelectionRange({
+          row0: Math.min(nextAnchor.row, next.row),
+          row1: Math.max(nextAnchor.row, next.row),
+          col0: Math.min(nextAnchor.col, next.col),
+          col1: Math.max(nextAnchor.col, next.col),
+        });
         renderer.revealSelection();
       }
     },
     [clampCell],
+  );
+
+  /** 复制当前选区到剪贴板(TSV,行以换行、列以制表符分隔)。 */
+  const copySelection = useCallback(async () => {
+    const r = {
+      row0: Math.min(anchorRef.current.row, selectionRef.current.row),
+      row1: Math.max(anchorRef.current.row, selectionRef.current.row),
+      col0: Math.min(anchorRef.current.col, selectionRef.current.col),
+      col1: Math.max(anchorRef.current.col, selectionRef.current.col),
+    };
+    if (sheet.rows === 0) return;
+    const win = sheet.window(r.row0, r.row1 + 1, r.col0, r.col1 + 1);
+    const cells = flattenWindow(win);
+    const lines: string[] = [];
+    for (let i = 0; i < win.rows; i += 1) {
+      lines.push(cells.slice(i * win.cols, (i + 1) * win.cols).join("\t"));
+    }
+    const tsv = lines.join("\n");
+    try {
+      await navigator.clipboard?.writeText?.(tsv);
+      setCopied(`已复制 ${win.rows}×${win.cols}`);
+      tracer.info("sheet.copy", { rows: win.rows, cols: win.cols });
+    } catch {
+      // 剪贴板不可用(权限/环境)时静默:选区仍在,用户可重试
+      setCopied("复制失败");
+    }
+    globalThis.setTimeout?.(() => setCopied(null), 1500);
+  }, [sheet, tracer]);
+
+  /** 对某列按方向排序(`"none"` 取消),并把选区带回数据首行。 */
+  const sortColumn = useCallback(
+    (col: number, dir: "asc" | "desc" | "none") => {
+      if (!canSort) return;
+      const renderer = rendererRef.current;
+      sheet.sort?.(col, dir, HEADER_ROWS);
+      setSort(dir === "none" ? null : { col, dir });
+      renderer?.refreshRows();
+      const r = Math.min(HEADER_ROWS, Math.max(0, sheet.rows - 1));
+      setSelection({ row: r, col });
+      setAnchor({ row: r, col });
+      renderer?.requestFrame();
+    },
+    [canSort, sheet],
   );
 
   const applyZoom = useCallback((next: number, anchor?: { x: number; y: number }) => {
@@ -295,12 +378,13 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
     if (drag.kind === "pan" && !drag.moved) {
       const { x, y } = pointerPosition(event);
       const hit = renderer.hitTest(x, y);
+      const extend = event.shiftKey;
       if (hit.kind === "cell") {
-        moveSelection(0, 0, { row: hit.row, col: hit.col });
+        moveSelection(0, 0, { row: hit.row, col: hit.col }, extend);
       } else if (hit.kind === "row-header") {
-        moveSelection(0, 0, { row: hit.row, col: 0 });
+        moveSelection(0, 0, { row: hit.row, col: 0 }, extend);
       } else if (hit.kind === "column-header") {
-        moveSelection(0, 0, { row: 0, col: hit.col });
+        moveSelection(0, 0, { row: 0, col: hit.col }, extend);
       }
     }
   };
@@ -321,6 +405,11 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
 
     if (event.ctrlKey || event.metaKey) {
       switch (event.key) {
+        case "c":
+        case "C":
+          event.preventDefault();
+          void copySelection();
+          return;
         case "=":
         case "+":
           event.preventDefault();
@@ -347,38 +436,40 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
       }
     }
 
+    // Shift + 方向键:扩展选区(保持锚点)
+    const extend = event.shiftKey;
     switch (event.key) {
       case "ArrowDown":
         event.preventDefault();
-        moveSelection(1, 0);
+        moveSelection(1, 0, undefined, extend);
         break;
       case "ArrowUp":
         event.preventDefault();
-        moveSelection(-1, 0);
+        moveSelection(-1, 0, undefined, extend);
         break;
       case "ArrowRight":
         event.preventDefault();
-        moveSelection(0, 1);
+        moveSelection(0, 1, undefined, extend);
         break;
       case "ArrowLeft":
         event.preventDefault();
-        moveSelection(0, -1);
+        moveSelection(0, -1, undefined, extend);
         break;
       case "PageDown":
         event.preventDefault();
-        moveSelection(pageRows, 0);
+        moveSelection(pageRows, 0, undefined, extend);
         break;
       case "PageUp":
         event.preventDefault();
-        moveSelection(-pageRows, 0);
+        moveSelection(-pageRows, 0, undefined, extend);
         break;
       case "Home":
         event.preventDefault();
-        moveSelection(0, 0, { col: 0 });
+        moveSelection(0, 0, { col: 0 }, extend);
         break;
       case "End":
         event.preventDefault();
-        moveSelection(0, 0, { col: sheet.cols - 1 });
+        moveSelection(0, 0, { col: sheet.cols - 1 }, extend);
         break;
       default:
         break;
@@ -442,6 +533,59 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
               取消冻结
             </button>
           </>
+        )}
+      </div>
+
+      {/* 排序 + 复制工具条(作用于当前列 / 当前选区) */}
+      <div className="sheet__tools-bar" data-testid="tools-bar">
+        {canSort && (
+          <>
+            <span className="sheet__freeze-title">
+              排序 {cellAddress(0, selection.col).replace(/\d+/, "")} 列
+            </span>
+            <button
+              type="button"
+              data-testid="sort-asc"
+              className={sort?.col === selection.col && sort.dir === "asc" ? "is-active" : ""}
+              onClick={() => sortColumn(selection.col, "asc")}
+              title="升序"
+            >
+              ↑ 升序
+            </button>
+            <button
+              type="button"
+              data-testid="sort-desc"
+              className={sort?.col === selection.col && sort.dir === "desc" ? "is-active" : ""}
+              onClick={() => sortColumn(selection.col, "desc")}
+              title="降序"
+            >
+              ↓ 降序
+            </button>
+            {sort && (
+              <button
+                type="button"
+                className="sheet__filter-link"
+                data-testid="sort-clear"
+                onClick={() => sortColumn(0, "none")}
+              >
+                取消排序
+              </button>
+            )}
+          </>
+        )}
+        <span className="sheet__tools-spacer" />
+        <button type="button" data-testid="copy-selection" onClick={() => void copySelection()}>
+          复制选区
+        </button>
+        {isMultiSelection && (
+          <span className="sheet__muted" data-testid="selection-size">
+            {range.row1 - range.row0 + 1}×{range.col1 - range.col0 + 1}
+          </span>
+        )}
+        {copied && (
+          <span className="sheet__copied" data-testid="copied-toast">
+            {copied}
+          </span>
         )}
       </div>
 
