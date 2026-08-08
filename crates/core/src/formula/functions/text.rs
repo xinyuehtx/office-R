@@ -28,6 +28,7 @@ pub fn register(m: &mut HashMap<&'static str, FuncImpl>) {
     m.insert("EXACT", exact);
     m.insert("TEXTJOIN", textjoin);
     m.insert("VALUE", value);
+    m.insert("TEXT", text);
     m.insert("CHAR", char_);
     m.insert("UNICHAR", char_);
     m.insert("CODE", code);
@@ -393,6 +394,28 @@ fn value(ev: &mut Evaluator, args: &[Node]) -> Value {
     }
 }
 
+/// `TEXT(value, format_text)`:按数字格式码把数值格式化成文本(接 `numfmt` 内核)。
+/// 文本值原样返回;数值走格式码(颜色码被忽略,只取文本部分)。
+fn text(ev: &mut Evaluator, args: &[Node]) -> Value {
+    if let Err(e) = arity(args, 2, Some(2)) {
+        return e;
+    }
+    let fmt = match ev.eval_text(&args[1]) {
+        Ok(s) => s,
+        Err(e) => return Value::Error(e),
+    };
+    match ev.eval(&args[0]) {
+        Value::Error(e) => Value::Error(e),
+        Value::Text(s) => Value::Text(s),
+        Value::Blank => Value::Text(crate::numfmt::format_number(0.0, &fmt)),
+        Value::Bool(b) => Value::Text(if b { "TRUE".into() } else { "FALSE".into() }),
+        other => match other.to_number() {
+            Ok(n) => Value::Text(crate::numfmt::format_number(n, &fmt)),
+            Err(e) => Value::Error(e),
+        },
+    }
+}
+
 fn char_(ev: &mut Evaluator, args: &[Node]) -> Value {
     if let Err(e) = arity(args, 1, Some(1)) {
         return e;
@@ -442,6 +465,17 @@ mod tests {
 
     fn ev(f: &str) -> Value {
         Workbook::new().eval_formula(f)
+    }
+
+    #[test]
+    fn text_formats_numbers_via_numfmt() {
+        assert_eq!(
+            ev("TEXT(1234.5,\"#,##0.00\")"),
+            Value::Text("1,234.50".into())
+        );
+        assert_eq!(ev("TEXT(0.25,\"0%\")"), Value::Text("25%".into()));
+        // 文本原样返回
+        assert_eq!(ev("TEXT(\"abc\",\"0.00\")"), Value::Text("abc".into()));
     }
 
     #[test]

@@ -52,6 +52,7 @@ pub fn register(m: &mut HashMap<&'static str, FuncImpl>) {
     m.insert("SUMIF", sumif);
     m.insert("SUMIFS", sumifs);
     m.insert("SUMPRODUCT", sumproduct);
+    m.insert("SUBTOTAL", subtotal);
 }
 
 /// 一元数值函数的公共外壳:校验 1 个参数、强制为数值,再套用 `f`。
@@ -579,6 +580,75 @@ fn sumifs(ev: &mut Evaluator, args: &[Node]) -> Value {
     Value::Number(acc)
 }
 
+/// `SUBTOTAL(function_num, ref1, ...)`:按功能号聚合。1-11 与 101-111 等价对待
+/// (本引擎无「隐藏行」概念;视图层的过滤是独立的行映射,不改变公式看到的数据)。
+fn subtotal(ev: &mut Evaluator, args: &[Node]) -> Value {
+    if args.len() < 2 {
+        return Value::Error(ExcelError::Value);
+    }
+    let fnum = match ev.eval_number(&args[0]) {
+        Ok(n) => n.trunc() as i64,
+        Err(e) => return Value::Error(e),
+    };
+    let code = if fnum >= 101 { fnum - 100 } else { fnum };
+    let mut nums: Vec<f64> = Vec::new();
+    let mut count_num = 0usize;
+    let mut count_nonblank = 0usize;
+    for arg in &args[1..] {
+        for v in ev.flatten_arg(arg) {
+            if !matches!(v, Value::Blank) {
+                count_nonblank += 1;
+            }
+            if let Value::Number(n) = v {
+                nums.push(n);
+                count_num += 1;
+            }
+        }
+    }
+    match code {
+        1 => {
+            if nums.is_empty() {
+                Value::Error(ExcelError::Div0)
+            } else {
+                Value::Number(nums.iter().sum::<f64>() / nums.len() as f64)
+            }
+        }
+        2 => Value::Number(count_num as f64),
+        3 => Value::Number(count_nonblank as f64),
+        4 => Value::Number(
+            nums.iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max)
+                .max(0.0),
+        ),
+        5 => {
+            if nums.is_empty() {
+                Value::Number(0.0)
+            } else {
+                Value::Number(nums.iter().cloned().fold(f64::INFINITY, f64::min))
+            }
+        }
+        6 => Value::Number(nums.iter().product()),
+        9 => Value::Number(nums.iter().sum()),
+        7 | 8 | 10 | 11 => {
+            let n = nums.len();
+            let ddof = if code == 7 || code == 10 { 1 } else { 0 };
+            if n <= ddof {
+                return Value::Error(ExcelError::Div0);
+            }
+            let mean = nums.iter().sum::<f64>() / n as f64;
+            let ss: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
+            let var = ss / (n - ddof) as f64;
+            if code == 7 || code == 8 {
+                Value::Number(var.sqrt())
+            } else {
+                Value::Number(var)
+            }
+        }
+        _ => Value::Error(ExcelError::Value),
+    }
+}
+
 fn sumproduct(ev: &mut Evaluator, args: &[Node]) -> Value {
     if args.is_empty() {
         return Value::Error(ExcelError::Value);
@@ -612,6 +682,21 @@ mod tests {
 
     fn ev(f: &str) -> Value {
         Workbook::new().eval_formula(f)
+    }
+
+    #[test]
+    fn subtotal_by_function_num() {
+        let mut wb = Workbook::new();
+        for (i, v) in [10, 20, 30].iter().enumerate() {
+            wb.set_input(i as u32, 0, &v.to_string()); // A1:A3
+        }
+        // 9=SUM, 1=AVERAGE, 4=MAX, 5=MIN, 2=COUNT;101 段等价
+        assert_eq!(wb.eval_formula("SUBTOTAL(9,A1:A3)"), Value::Number(60.0));
+        assert_eq!(wb.eval_formula("SUBTOTAL(1,A1:A3)"), Value::Number(20.0));
+        assert_eq!(wb.eval_formula("SUBTOTAL(4,A1:A3)"), Value::Number(30.0));
+        assert_eq!(wb.eval_formula("SUBTOTAL(5,A1:A3)"), Value::Number(10.0));
+        assert_eq!(wb.eval_formula("SUBTOTAL(2,A1:A3)"), Value::Number(3.0));
+        assert_eq!(wb.eval_formula("SUBTOTAL(109,A1:A3)"), Value::Number(60.0));
     }
 
     #[test]

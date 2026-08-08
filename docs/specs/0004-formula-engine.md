@@ -77,7 +77,9 @@
 ## 6. 边界与非目标
 
 - 已支持:跨工作表引用(`Sheet!A1` / `'带空格'!A1:B2`)、具名区域(`define_name`)、
-  迭代计算(循环引用,Jacobi / Gauss–Seidel)。
-- 非目标:动态数组溢出(spill)、engineering/database/cube 类别。
+  迭代计算(循环引用,Jacobi / Gauss–Seidel)、`TEXT` 接 numfmt 格式码、`SUBTOTAL`、
+  工程函数(进制转换 + 位运算)、现代动态数组函数(`XLOOKUP`/`UNIQUE`/`SORT`/`FILTER`/`SEQUENCE`,返回数组值)。
+- 非目标:动态数组**溢出到相邻单元格**(spill;数组作为中间值可用)、`LAMBDA`/`LET`、
+  database(`DSUM` 等)、cube 类别。
 - 输入超过嵌套/长度上限时返回错误而非 panic。
 - 引擎**绝不 panic**:任何非法输入都映射为某个 `ExcelError`。

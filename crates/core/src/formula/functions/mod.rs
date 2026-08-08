@@ -5,6 +5,8 @@
 //! 这是「对齐 Excel 数百个函数」能持续推进的关键:补齐是机械式的。
 
 mod datetime;
+mod dynamic;
+mod engineering;
 mod financial;
 mod info;
 mod logical;
@@ -31,6 +33,8 @@ fn registry() -> &'static HashMap<&'static str, FuncImpl> {
         lookup::register(&mut m);
         info::register(&mut m);
         financial::register(&mut m);
+        engineering::register(&mut m);
+        dynamic::register(&mut m);
         m
     })
 }
