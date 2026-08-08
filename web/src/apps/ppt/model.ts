@@ -36,6 +36,8 @@ export interface Shape {
   flip_v?: boolean;
   /** 内嵌对象占位类型:"chart" / "diagram" / "table";普通形状为 null。 */
   placeholder_kind?: string | null;
+  /** 渐变填充两端色 [首, 末](RRGGBB);无渐变为 null。上→下线性渐变。 */
+  gradient?: [string, string] | null;
 }
 
 export interface Slide {

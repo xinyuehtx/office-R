@@ -41,6 +41,7 @@ function fakeCtx() {
       fillText: (t: string) => calls.push(`fillText:${t}`),
       measureText: (t: string) => ({ width: t.length * 8 }),
       setLineDash: () => {},
+      createLinearGradient: () => ({ addColorStop: () => {} }),
       save: () => calls.push("save"),
       restore: () => calls.push("restore"),
       translate: () => {},
@@ -172,8 +173,31 @@ describe("drawSlide", () => {
     expect(calls.some((c) => c.startsWith("fillText:SmartArt"))).toBe(true);
   });
 
-  it("旋转/翻转形状发出 rotate/scale 变换", () => {
+  it("渐变填充调用 createLinearGradient 并 fill", () => {
+    const grad = vi.fn(() => ({ addColorStop: () => {} }));
     const slide: Slide = {
+      shapes: [
+        {
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 50,
+          geom: "rect",
+          fill: null,
+          image: null,
+          paragraphs: [],
+          gradient: ["FF0000", "0000FF"],
+        },
+      ],
+    };
+    const { ctx, calls } = fakeCtx();
+    (ctx as unknown as { createLinearGradient: unknown }).createLinearGradient = grad;
+    drawSlide(ctx, slide, 1, new Map());
+    expect(grad).toHaveBeenCalled();
+    expect(calls).toContain("fill");
+  });
+
+  it("旋转/翻转形状发出 rotate/scale 变换", () => {    const slide: Slide = {
       shapes: [
         {
           x: 0,

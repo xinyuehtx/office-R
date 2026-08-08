@@ -14,8 +14,9 @@
 //! 旋转/翻转(`a:xfrm@rot/@flipH/@flipV`)、文本默认样式继承(母版 `p:txStyles`)、
 //! 动画/切换标记(`p:timing`/`p:transition` → `has_animation`/`has_transition`)、
 //! 图表/SmartArt 占位(`p:graphicFrame` → `placeholder_kind`,仅占位框 + 类型标签)、
-//! 组合形状 `p:grpSp`(按 `chOff`/`chExt`→`off`/`ext` 映射子坐标,支持嵌套)。
-//! **非目标**:动画/切换的具体时间线回放、图表/SmartArt 的真实绘制、自定义几何。
+//! 组合形状 `p:grpSp`(按 `chOff`/`chExt`→`off`/`ext` 映射子坐标,支持嵌套)、
+//! 渐变填充 `a:gradFill`(取首/末停靠色,视图上→下线性渐变)。
+//! **非目标**:动画/切换的具体时间线回放、图表/SmartArt 的真实绘制、自定义几何、图片填充、阴影效果。
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -86,6 +87,9 @@ pub struct Shape {
     /// 这些是 `p:graphicFrame` 里的内嵌对象,本期只渲染占位框 + 类型标签。
     #[serde(default)]
     pub placeholder_kind: Option<String>,
+    /// 渐变填充的两端色(首/末停靠点 `RRGGBB`);无渐变为 `None`。视图按上→下线性渐变绘制。
+    #[serde(default)]
+    pub gradient: Option<(String, String)>,
 }
 
 /// 一张幻灯片。
@@ -380,6 +384,8 @@ struct ShapeBuilder {
     flip_v: bool,
     /// graphicFrame 内容类型(chart/diagram/table)。
     placeholder_kind: Option<String>,
+    /// 渐变填充停靠色(按出现顺序);finish 时取首/末为两端。
+    grad_stops: Vec<String>,
 }
 
 impl ShapeBuilder {
@@ -397,6 +403,10 @@ impl ShapeBuilder {
             flip_h: self.flip_h,
             flip_v: self.flip_v,
             placeholder_kind: self.placeholder_kind,
+            gradient: match (self.grad_stops.first(), self.grad_stops.last()) {
+                (Some(a), Some(b)) => Some((a.clone(), b.clone())),
+                _ => None,
+            },
         }
     }
     fn is_renderable(&self) -> bool {
@@ -1034,6 +1044,14 @@ fn handle_start(
                     if let Some(b) = cur.as_mut() {
                         b.fill = Some(v);
                     }
+                } else if stack.iter().any(|s| s == "spPr")
+                    && stack.iter().any(|s| s == "gradFill")
+                    && !stack.iter().any(|s| s == "ln")
+                {
+                    // 渐变停靠色:按出现顺序收集(位置忽略,视图按首/末两端线性渐变)
+                    if let Some(b) = cur.as_mut() {
+                        b.grad_stops.push(v);
+                    }
                 }
             }
         }
@@ -1419,6 +1437,29 @@ mod tests {
             run.color.as_deref(),
             Some("1F3864"),
             "应继承母版 title 颜色"
+        );
+    }
+
+    #[test]
+    fn parses_gradient_fill() {
+        let slide = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+          <p:sp><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm>
+            <a:prstGeom prst="rect"/>
+            <a:gradFill><a:gsLst>
+              <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+              <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+            </a:gsLst></a:gradFill></p:spPr></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let (theme, fallback, defaults) = empty_ctx();
+        let ctx = SlideCtx {
+            theme: &theme,
+            fallback: &fallback,
+            text_defaults: &defaults,
+        };
+        let shapes = parse_slide(slide, &ctx).shapes;
+        assert_eq!(
+            shapes[0].gradient,
+            Some(("FF0000".to_string(), "0000FF".to_string()))
         );
     }
 

@@ -183,7 +183,15 @@ export function drawSlide(
 
     // 自选图形:填充 + 描边
     if (shape.geom && (w > 0 || h > 0)) {
-      if (shape.fill) {
+      if (shape.gradient) {
+        // 渐变填充:上→下线性,两端色
+        const grad = ctx.createLinearGradient(x, y, x, y + h);
+        grad.addColorStop(0, colorOf(shape.gradient[0], "#ffffff"));
+        grad.addColorStop(1, colorOf(shape.gradient[1], "#ffffff"));
+        ctx.fillStyle = grad;
+        fillShapeGeom(ctx, shape.geom, x, y, w, h);
+        ctx.fill();
+      } else if (shape.fill) {
         ctx.fillStyle = colorOf(shape.fill, "#ffffff");
         fillShapeGeom(ctx, shape.geom, x, y, w, h);
         if (shape.geom === "line") {
