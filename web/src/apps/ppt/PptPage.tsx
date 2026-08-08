@@ -21,6 +21,8 @@ export function PptPage() {
   const [current, setCurrent] = useState(0);
   const [slideCount, setSlideCount] = useState(0);
   const [presenting, setPresenting] = useState(false);
+  /** 用户缩放倍率(在适配缩放之上叠加);演示模式恒为适配。 */
+  const [zoom, setZoom] = useState(1);
 
   const docRef = useRef<PptDocument | null>(null);
   const imagesRef = useRef<Map<string, HTMLImageElement>>(new Map());
@@ -50,7 +52,11 @@ export function PptPage() {
     canvas.style.width = `${cssW}px`;
     canvas.style.height = `${cssH}px`;
 
-    const { scale, offsetX, offsetY } = fitScale(pres.width_px, pres.height_px, cssW, cssH);
+    const fit = fitScale(pres.width_px, pres.height_px, cssW, cssH);
+    // 演示模式恒用适配缩放;普通视图叠加用户缩放并居中(超出则对称裁切)
+    const scale = presenting ? fit.scale : fit.scale * zoom;
+    const offsetX = (cssW - pres.width_px * scale) / 2;
+    const offsetY = (cssH - pres.height_px * scale) / 2;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
     // 幻灯纸面
@@ -72,7 +78,7 @@ export function PptPage() {
     ctx.translate(offsetX, offsetY);
     drawSlide(ctx, slide, scale, slideImages);
     ctx.restore();
-  }, [current]);
+  }, [current, zoom, presenting]);
 
   const requestDraw = useCallback(() => {
     if (rafRef.current !== null) return;
@@ -103,6 +109,7 @@ export function PptPage() {
 
         setSlideCount(doc.presentation.slides.length);
         setCurrent(0);
+        setZoom(1);
         setStatus("ready");
         requestDraw();
       } catch (e) {
@@ -275,6 +282,32 @@ export function PptPage() {
                 <button type="button" onClick={() => go(1)} disabled={current >= slideCount - 1}>
                   下一张 ▶
                 </button>
+                <span className="ppt-zoom" data-testid="ppt-zoom">
+                  <button
+                    type="button"
+                    data-testid="ppt-zoom-out"
+                    onClick={() => setZoom((z) => Math.max(0.25, +(z - 0.25).toFixed(2)))}
+                    title="缩小"
+                  >
+                    −
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setZoom(1)}
+                    title="适配"
+                    data-testid="ppt-zoom-reset"
+                  >
+                    {Math.round(zoom * 100)}%
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="ppt-zoom-in"
+                    onClick={() => setZoom((z) => Math.min(4, +(z + 0.25).toFixed(2)))}
+                    title="放大"
+                  >
+                    +
+                  </button>
+                </span>
               </div>
             )}
           </div>
