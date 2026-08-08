@@ -10,8 +10,11 @@
 //! EMU→px:914400 EMU=1 英寸=96px,即 ÷9525;字号 `sz` 为百分之一磅,px = sz/100 × 4/3。
 //!
 //! **已支持**:占位符几何**继承**(slide 无 xfrm → 借 slideLayout → slideMaster)、
-//! 主题配色 `schemeClr`(解析 `ppt/theme/theme1.xml` 的 `clrScheme`,含 tx1/bg1→dk1/lt1 默认映射)。
-//! **非目标**:动画/切换、SmartArt/图表、组合形状子坐标、旋转翻转、自定义几何、文本默认样式继承。
+//! 主题配色 `schemeClr`(解析 `ppt/theme/theme1.xml` 的 `clrScheme`,含 tx1/bg1→dk1/lt1 默认映射)、
+//! 旋转/翻转(`a:xfrm@rot/@flipH/@flipV`)、文本默认样式继承(母版 `p:txStyles`)、
+//! 动画/切换标记(`p:timing`/`p:transition` → `has_animation`/`has_transition`)、
+//! 图表/SmartArt 占位(`p:graphicFrame` → `placeholder_kind`,仅占位框 + 类型标签)。
+//! **非目标**:动画/切换的具体时间线回放、图表/SmartArt 的真实绘制、组合形状子坐标、自定义几何。
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -70,12 +73,30 @@ pub struct Shape {
     pub image: Option<String>,
     /// 文本段落。
     pub paragraphs: Vec<Para>,
+    /// 旋转角度(度,顺时针);`a:xfrm@rot` 为 1/60000 度,已换算。
+    #[serde(default)]
+    pub rotation: f64,
+    /// 水平翻转 / 垂直翻转(`a:xfrm@flipH/@flipV`)。
+    #[serde(default)]
+    pub flip_h: bool,
+    #[serde(default)]
+    pub flip_v: bool,
+    /// 内容占位类型:`"chart"` / `"diagram"`(SmartArt) / `"table"`;普通形状为 `None`。
+    /// 这些是 `p:graphicFrame` 里的内嵌对象,本期只渲染占位框 + 类型标签。
+    #[serde(default)]
+    pub placeholder_kind: Option<String>,
 }
 
 /// 一张幻灯片。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Slide {
     pub shapes: Vec<Shape>,
+    /// 该幻灯是否含动画(`p:timing`)。
+    #[serde(default)]
+    pub has_animation: bool,
+    /// 该幻灯是否含切换效果(`p:transition`)。
+    #[serde(default)]
+    pub has_transition: bool,
 }
 
 /// 演示文稿模型(不含图片字节)。
@@ -124,13 +145,14 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedPpt, String> {
             Err(_) => continue,
         };
         let rels = read_slide_rels(&mut zip, path);
-        let fallback = layout_master_geom(&mut zip, &rels);
+        let (fallback, text_defaults) = layout_master_geom(&mut zip, &rels);
         let ctx = SlideCtx {
             theme: &theme,
             fallback: &fallback,
+            text_defaults: &text_defaults,
         };
-        let shapes = parse_slide(&xml, &ctx);
-        slides.push(Slide { shapes });
+        let slide = parse_slide(&xml, &ctx);
+        slides.push(slide);
 
         // 收集该幻灯用到的图片字节
         for (embed, target) in &rels {
@@ -351,6 +373,12 @@ struct ShapeBuilder {
     ph: Option<String>,
     /// 本形状是否带显式 `a:xfrm`(有则不向版式借几何)。
     has_xfrm: bool,
+    /// 旋转(度)与翻转。
+    rotation: f64,
+    flip_h: bool,
+    flip_v: bool,
+    /// graphicFrame 内容类型(chart/diagram/table)。
+    placeholder_kind: Option<String>,
 }
 
 impl ShapeBuilder {
@@ -364,11 +392,18 @@ impl ShapeBuilder {
             fill: self.fill,
             image: self.image,
             paragraphs: self.paragraphs,
+            rotation: self.rotation,
+            flip_h: self.flip_h,
+            flip_v: self.flip_v,
+            placeholder_kind: self.placeholder_kind,
         }
     }
     fn is_renderable(&self) -> bool {
-        // 有显式几何(位置/尺寸)或有文本才渲染;占位符无 xfrm 又借不到几何则跳过
-        self.width > 0.0 || self.height > 0.0 || !self.paragraphs.is_empty()
+        // 有显式几何(位置/尺寸)或有文本或是内容占位才渲染
+        self.width > 0.0
+            || self.height > 0.0
+            || !self.paragraphs.is_empty()
+            || self.placeholder_kind.is_some()
     }
 }
 
@@ -377,16 +412,38 @@ type Theme = std::collections::HashMap<String, String>;
 /// 占位符几何:`type|idx` → (x, y, w, h)(像素)。
 type PhGeom = std::collections::HashMap<String, (f64, f64, f64, f64)>;
 
-/// 幻灯解析上下文:主题配色 + 占位符几何回退(来自版式/母版)。
+/// 文本默认样式(来自母版 `p:txStyles`),按 title / body / other 三类的 lvl1 defRPr。
+#[derive(Default, Clone)]
+struct TextDefaults {
+    /// (字号磅, 颜色 RRGGBB) 三类默认。
+    title: (Option<f64>, Option<String>),
+    body: (Option<f64>, Option<String>),
+    other: (Option<f64>, Option<String>),
+}
+
+impl TextDefaults {
+    /// 按占位符类型选默认:title/ctrTitle→title;body/subTitle→body;其余→other。
+    fn for_ph(&self, ph: &Option<String>) -> &(Option<f64>, Option<String>) {
+        let ty = ph.as_deref().unwrap_or("").split('|').next().unwrap_or("");
+        match ty {
+            "title" | "ctrTitle" => &self.title,
+            "body" | "subTitle" => &self.body,
+            _ => &self.other,
+        }
+    }
+}
+
+/// 幻灯解析上下文:主题配色 + 占位符几何回退 + 文本默认样式(来自版式/母版)。
 struct SlideCtx<'a> {
     theme: &'a Theme,
     fallback: &'a PhGeom,
+    text_defaults: &'a TextDefaults,
 }
 
 /// 解析单张幻灯的形状树。用元素名栈跟踪上下文(区分 spPr 填充 vs rPr 颜色等)。
 ///
 /// `ctx` 提供主题配色(解析 `schemeClr`)与占位符几何回退(占位符 sp 无 xfrm 时借用版式/母版)。
-fn parse_slide(xml: &str, ctx: &SlideCtx) -> Vec<Shape> {
+fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
     let mut reader = XmlReader::from_str(xml);
     let mut buf = Vec::new();
     let mut shapes = Vec::new();
@@ -395,12 +452,23 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Vec<Shape> {
     let mut cur: Option<ShapeBuilder> = None;
     let mut cur_para: Option<Para> = None;
     let mut cur_run: Option<Run> = None;
+    // graphicFrame:内嵌 chart/diagram/table,当作一个「内容占位」形状
+    let mut has_animation = false;
+    let mut has_transition = false;
 
     while let Ok(ev) = reader.read_event_into(&mut buf) {
         match ev {
             // Start:处理后压栈(有对应 End)
             Event::Start(e) => {
                 let name = local(&e);
+                match name.as_str() {
+                    // 动画 / 切换:只标记存在
+                    "timing" => has_animation = true,
+                    "transition" => has_transition = true,
+                    // graphicFrame 起始:作为一个内容占位形状
+                    "graphicFrame" => cur = Some(ShapeBuilder::default()),
+                    _ => {}
+                }
                 handle_start(
                     &e,
                     &name,
@@ -415,6 +483,15 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Vec<Shape> {
             // Empty:处理但**不压栈**(无对应 End),用当前栈作为其上下文
             Event::Empty(e) => {
                 let name = local(&e);
+                if name == "transition" {
+                    has_transition = true;
+                }
+                // graphicData@uri 指明内容类型(chart/diagram/table)
+                if name == "graphicData" {
+                    if let Some(b) = cur.as_mut() {
+                        b.placeholder_kind = graphic_kind(&attr(&e, "uri").unwrap_or_default());
+                    }
+                }
                 handle_start(
                     &e,
                     &name,
@@ -427,14 +504,28 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Vec<Shape> {
             }
             Event::End(_e) => {
                 let name = stack.pop().unwrap_or_default();
-                handle_end(
-                    &name,
-                    ctx.fallback,
-                    &mut shapes,
-                    &mut cur,
-                    &mut cur_para,
-                    &mut cur_run,
-                );
+                if name == "graphicFrame" {
+                    // 收尾 graphicFrame 形状(与 sp/pic 相同的落盘路径)
+                    handle_end(
+                        "sp",
+                        ctx.fallback,
+                        ctx.text_defaults,
+                        &mut shapes,
+                        &mut cur,
+                        &mut cur_para,
+                        &mut cur_run,
+                    );
+                } else {
+                    handle_end(
+                        &name,
+                        ctx.fallback,
+                        ctx.text_defaults,
+                        &mut shapes,
+                        &mut cur,
+                        &mut cur_para,
+                        &mut cur_run,
+                    );
+                }
             }
             Event::Text(t) => {
                 if stack.last().map(|s| s.as_str()) == Some("t") {
@@ -451,7 +542,24 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Vec<Shape> {
         buf.clear();
     }
 
-    shapes
+    Slide {
+        shapes,
+        has_animation,
+        has_transition,
+    }
+}
+
+/// graphicData@uri → 内容类型标签。
+fn graphic_kind(uri: &str) -> Option<String> {
+    if uri.contains("/chart") {
+        Some("chart".to_string())
+    } else if uri.contains("diagram") || uri.contains("smartart") {
+        Some("diagram".to_string())
+    } else if uri.contains("/table") {
+        Some("table".to_string())
+    } else {
+        None
+    }
 }
 
 /// 加载主题配色:从 `ppt/theme/theme1.xml` 的 `a:clrScheme` 取各 scheme 名 → RRGGBB。
@@ -529,15 +637,16 @@ fn resolve_scheme_color(theme: &Theme, val: &str) -> Option<String> {
 fn layout_master_geom(
     zip: &mut ZipArchive<Cursor<Vec<u8>>>,
     slide_rels: &[(String, String)],
-) -> PhGeom {
+) -> (PhGeom, TextDefaults) {
     let mut geom = PhGeom::new();
+    let mut defaults = TextDefaults::default();
     // slide → 版式
     let layout_path = slide_rels
         .iter()
         .find(|(_, t)| t.contains("slideLayout"))
         .map(|(_, t)| normalize_ppt_path(&t.replace("../", "")));
     let Some(layout_path) = layout_path else {
-        return geom;
+        return (geom, defaults);
     };
     // 版式 → 母版
     let layout_rels = read_rels_for(zip, &layout_path);
@@ -550,6 +659,7 @@ fn layout_master_geom(
             for (k, v) in collect_placeholder_geom(&xml) {
                 geom.insert(k, v); // 母版打底
             }
+            defaults = collect_text_defaults(&xml); // 文本默认样式来自母版 txStyles
         }
     }
     if let Ok(xml) = read_zip_text(zip, &layout_path) {
@@ -557,7 +667,72 @@ fn layout_master_geom(
             geom.insert(k, v); // 版式覆盖母版
         }
     }
-    geom
+    (geom, defaults)
+}
+
+/// 从母版 `p:txStyles` 提取 title/body/other 的 lvl1 `a:defRPr`(字号磅 + 颜色)。
+fn collect_text_defaults(xml: &str) -> TextDefaults {
+    let mut out = TextDefaults::default();
+    let mut reader = XmlReader::from_str(xml);
+    let mut buf = Vec::new();
+    // 当前处于哪个样式块;进入 lvl1pPr 后遇到的 defRPr 记录其 sz/color
+    let mut style: Option<&'static str> = None;
+    let mut in_lvl1 = false;
+    let mut in_defrpr = false;
+    let mut cur_sz: Option<f64> = None;
+    let mut cur_color: Option<String> = None;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let n = local(&e);
+                match n.as_str() {
+                    "titleStyle" => style = Some("title"),
+                    "bodyStyle" => style = Some("body"),
+                    "otherStyle" => style = Some("other"),
+                    "lvl1pPr" => in_lvl1 = true,
+                    "defRPr" if in_lvl1 => {
+                        in_defrpr = true;
+                        cur_sz = attr(&e, "sz")
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .map(|v| v / 100.0);
+                        cur_color = None;
+                    }
+                    "srgbClr" if in_defrpr => {
+                        cur_color = attr(&e, "val");
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(e)) => {
+                let n = local_end(&e);
+                match n.as_str() {
+                    "defRPr" if in_lvl1 => {
+                        if let Some(s) = style {
+                            let slot = match s {
+                                "title" => &mut out.title,
+                                "body" => &mut out.body,
+                                _ => &mut out.other,
+                            };
+                            if cur_sz.is_some() {
+                                slot.0 = cur_sz;
+                            }
+                            if cur_color.is_some() {
+                                slot.1 = cur_color.clone();
+                            }
+                        }
+                        in_defrpr = false;
+                    }
+                    "lvl1pPr" => in_lvl1 = false,
+                    "titleStyle" | "bodyStyle" | "otherStyle" => style = None,
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
 }
 
 /// 读取任意部件的 `_rels/<file>.rels`。
@@ -681,6 +856,20 @@ fn handle_start(
                 b.ph = Some(format!("{ty}|{idx}"));
             }
         }
+        "xfrm" => {
+            // 旋转(1/60000 度)与翻转在 xfrm 自身;off/ext 是其子元素
+            if let Some(b) = cur.as_mut() {
+                if let Some(rot) = attr(e, "rot").and_then(|s| s.parse::<f64>().ok()) {
+                    b.rotation = rot / 60000.0;
+                }
+                if attr(e, "flipH").as_deref() == Some("1") {
+                    b.flip_h = true;
+                }
+                if attr(e, "flipV").as_deref() == Some("1") {
+                    b.flip_v = true;
+                }
+            }
+        }
         "off" => {
             if let Some(b) = cur.as_mut() {
                 b.has_xfrm = true;
@@ -780,6 +969,7 @@ fn handle_start(
 fn handle_end(
     name: &str,
     fallback: &PhGeom,
+    text_defaults: &TextDefaults,
     shapes: &mut Vec<Shape>,
     cur: &mut Option<ShapeBuilder>,
     cur_para: &mut Option<Para>,
@@ -808,6 +998,20 @@ fn handle_end(
                             b.y = y;
                             b.width = w;
                             b.height = h;
+                        }
+                    }
+                }
+                // 文本默认样式继承:run 缺字号/颜色时,按占位符类型从母版 txStyles 补
+                let (def_sz, def_color) = text_defaults.for_ph(&b.ph).clone();
+                if def_sz.is_some() || def_color.is_some() {
+                    for para in &mut b.paragraphs {
+                        for run in &mut para.runs {
+                            if run.size_pt.is_none() {
+                                run.size_pt = def_sz;
+                            }
+                            if run.color.is_none() {
+                                run.color = def_color.clone();
+                            }
                         }
                     }
                 }
@@ -895,19 +1099,20 @@ mod tests {
       </p:spTree></p:cSld>
     </p:sld>"#;
 
-    /// 无主题、无回退的空上下文。
-    fn empty_ctx() -> (Theme, PhGeom) {
-        (Theme::new(), PhGeom::new())
+    /// 无主题、无回退、无默认样式的空上下文。
+    fn empty_ctx() -> (Theme, PhGeom, TextDefaults) {
+        (Theme::new(), PhGeom::new(), TextDefaults::default())
     }
 
     #[test]
     fn parses_shapes_text_geometry_fill() {
-        let (theme, fallback) = empty_ctx();
+        let (theme, fallback, text_defaults) = empty_ctx();
         let ctx = SlideCtx {
             theme: &theme,
             fallback: &fallback,
+            text_defaults: &text_defaults,
         };
-        let shapes = parse_slide(std::str::from_utf8(SLIDE).unwrap(), &ctx);
+        let shapes = parse_slide(std::str::from_utf8(SLIDE).unwrap(), &ctx).shapes;
         assert_eq!(shapes.len(), 2);
         let sp = &shapes[0];
         assert_eq!(sp.x, 96.0); // 914400 EMU = 96px
@@ -996,11 +1201,13 @@ mod tests {
             <a:prstGeom prst="rect"/><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:spPr></p:sp>
         </p:spTree></p:cSld></p:sld>"#;
         let empty = PhGeom::new();
+        let defaults = TextDefaults::default();
         let ctx = SlideCtx {
             theme: &theme,
             fallback: &empty,
+            text_defaults: &defaults,
         };
-        let shapes = parse_slide(slide, &ctx);
+        let shapes = parse_slide(slide, &ctx).shapes;
         assert_eq!(shapes[0].fill.as_deref(), Some("4472C4"));
     }
 
@@ -1047,6 +1254,103 @@ mod tests {
         // 借到版式的位置/尺寸(838200 EMU = 88px)
         assert!((sp.x - 88.0).abs() < 1.0, "x={}", sp.x);
         assert!((sp.width - 816.0).abs() < 1.0, "w={}", sp.width);
+    }
+
+    #[test]
+    fn parses_rotation_and_flip() {
+        // rot=5400000(1/60000 度)= 90 度;flipH=1
+        let slide = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+          <p:sp><p:spPr><a:xfrm rot="5400000" flipH="1"><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm>
+            <a:prstGeom prst="rect"/></p:spPr></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let (theme, fallback, defaults) = empty_ctx();
+        let ctx = SlideCtx {
+            theme: &theme,
+            fallback: &fallback,
+            text_defaults: &defaults,
+        };
+        let shapes = parse_slide(slide, &ctx).shapes;
+        assert_eq!(shapes[0].rotation, 90.0);
+        assert!(shapes[0].flip_h);
+        assert!(!shapes[0].flip_v);
+    }
+
+    #[test]
+    fn text_default_style_inherited_from_master() {
+        // 母版 txStyles:titleStyle lvl1 defRPr sz=4400 color=1F3864
+        let master = br#"<p:sldMaster xmlns:p="p" xmlns:a="a"><p:txStyles>
+          <p:titleStyle><a:lvl1pPr><a:defRPr sz="4400"><a:solidFill><a:srgbClr val="1F3864"/></a:solidFill></a:defRPr></a:lvl1pPr></p:titleStyle>
+          <p:bodyStyle><a:lvl1pPr><a:defRPr sz="1800"/></a:lvl1pPr></p:bodyStyle>
+        </p:txStyles></p:sldMaster>"#;
+        let layout = br#"<p:sldLayout xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree></p:spTree></p:cSld></p:sldLayout>"#;
+        // 幻灯 title 占位符文本无 sz/color → 应继承母版 44pt / 1F3864
+        let slide_str = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+            <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm></p:spPr>
+            <p:txBody><a:p><a:r><a:t>标题文本</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let pres = br#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldSz cx="9144000" cy="6858000"/>
+          <p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#;
+        let pres_rels = br#"<Relationships xmlns="x"><Relationship Id="rId1" Type="t" Target="slides/slide1.xml"/></Relationships>"#;
+        let slide_rels = br#"<Relationships xmlns="x"><Relationship Id="rId9" Type="slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
+        let layout_rels = br#"<Relationships xmlns="x"><Relationship Id="rIdM" Type="slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>"#;
+        let pptx = zip_of(&[
+            ("ppt/presentation.xml", pres),
+            ("ppt/_rels/presentation.xml.rels", pres_rels),
+            ("ppt/slides/slide1.xml", slide_str.as_bytes()),
+            ("ppt/slides/_rels/slide1.xml.rels", slide_rels),
+            ("ppt/slideLayouts/slideLayout1.xml", layout),
+            ("ppt/slideLayouts/_rels/slideLayout1.xml.rels", layout_rels),
+            ("ppt/slideMasters/slideMaster1.xml", master),
+        ]);
+        let parsed = parse(&pptx).expect("解析");
+        let run = &parsed.presentation.slides[0].shapes[0].paragraphs[0].runs[0];
+        assert_eq!(run.size_pt, Some(44.0), "应继承母版 title 字号");
+        assert_eq!(
+            run.color.as_deref(),
+            Some("1F3864"),
+            "应继承母版 title 颜色"
+        );
+    }
+
+    #[test]
+    fn detects_graphic_frame_kind() {
+        // graphicFrame 内嵌图表 / SmartArt → 占位框 + placeholder_kind
+        let chart = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+          <p:graphicFrame><p:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></p:xfrm>
+            <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"/></a:graphic>
+          </p:graphicFrame></p:spTree></p:cSld></p:sld>"#;
+        let (theme, fallback, defaults) = empty_ctx();
+        let ctx = SlideCtx {
+            theme: &theme,
+            fallback: &fallback,
+            text_defaults: &defaults,
+        };
+        let shapes = parse_slide(chart, &ctx).shapes;
+        assert_eq!(shapes[0].placeholder_kind.as_deref(), Some("chart"));
+
+        let smart = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+          <p:graphicFrame><p:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></p:xfrm>
+            <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"/></a:graphic>
+          </p:graphicFrame></p:spTree></p:cSld></p:sld>"#;
+        let shapes = parse_slide(smart, &ctx).shapes;
+        assert_eq!(shapes[0].placeholder_kind.as_deref(), Some("diagram"));
+    }
+
+    #[test]
+    fn detects_animation_and_transition() {
+        let slide = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree></p:spTree></p:cSld>
+          <p:transition><p:fade/></p:transition>
+          <p:timing><p:tnLst/></p:timing></p:sld>"#;
+        let (theme, fallback, defaults) = empty_ctx();
+        let ctx = SlideCtx {
+            theme: &theme,
+            fallback: &fallback,
+            text_defaults: &defaults,
+        };
+        let parsed = parse_slide(slide, &ctx);
+        assert!(parsed.has_animation);
+        assert!(parsed.has_transition);
     }
 }
 
@@ -1110,11 +1414,19 @@ mod fixture_gen {
                 .as_bytes(),
             );
             put(&mut w, "ppt/slides/_rels/slide1.xml.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="image" Target="../media/image1.png"/></Relationships>"#);
-            put(
-                &mut w,
-                "ppt/slides/slide2.xml",
-                slide_xml("第二张幻灯", "居中标题 + 椭圆形状,演示模式可翻页", false).as_bytes(),
-            );
+            // 第二张:标题 + 旋转矩形 + 图表占位(graphicFrame),并带切换/动画标记。
+            let slide2 = r#"<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><p:cSld><p:spTree>
+             <p:sp><p:spPr><a:xfrm><a:off x="838200" y="365760"/><a:ext cx="7772400" cy="1000000"/></a:xfrm>
+               <a:prstGeom prst="rect"/></p:spPr>
+               <p:txBody><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="3200" b="1"><a:solidFill><a:srgbClr val="1F3864"/></a:solidFill></a:rPr><a:t>第二张幻灯</a:t></a:r></a:p></p:txBody></p:sp>
+             <p:sp><p:spPr><a:xfrm rot="2700000"><a:off x="838200" y="1800000"/><a:ext cx="2200000" cy="1200000"/></a:xfrm>
+               <a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="4472C4"/></a:solidFill></p:spPr></p:sp>
+             <p:graphicFrame><p:xfrm><a:off x="4200000" y="1800000"/><a:ext cx="3500000" cy="2600000"/></p:xfrm>
+               <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"/></a:graphic></p:graphicFrame>
+           </p:spTree></p:cSld>
+           <p:transition><p:fade/></p:transition>
+           <p:timing><p:tnLst/></p:timing></p:sld>"#;
+            put(&mut w, "ppt/slides/slide2.xml", slide2.as_bytes());
             put(&mut w, "ppt/media/image1.png", PNG);
             w.finish().unwrap();
         }

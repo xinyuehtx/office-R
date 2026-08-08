@@ -95,6 +95,46 @@ function drawShapeText(
   }
 }
 
+/** 内嵌对象占位类型 → 中文标签。 */
+function kindLabel(kind: string): string {
+  switch (kind) {
+    case "chart":
+      return "图表";
+    case "diagram":
+      return "SmartArt";
+    case "table":
+      return "表格";
+    default:
+      return kind;
+  }
+}
+
+/** 图表/SmartArt/表格:本期只画虚线占位框 + 居中类型标签。 */
+function drawPlaceholderKind(
+  ctx: CanvasRenderingContext2D,
+  kind: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  scale: number,
+) {
+  ctx.save();
+  ctx.strokeStyle = "#8c959f";
+  ctx.setLineDash([6, 4]);
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+  ctx.setLineDash([]);
+  const px = Math.max(11, 14 * scale);
+  ctx.font = `${px}px ${FONT_FAMILY}`;
+  ctx.fillStyle = "#57606a";
+  ctx.textBaseline = "middle";
+  const label = kindLabel(kind);
+  const tw = ctx.measureText(label).width;
+  ctx.fillText(label, x + (w - tw) / 2, y + h / 2);
+  ctx.restore();
+}
+
 /** 绘制一张幻灯到 ctx,已按 `scale` 缩放;`images` 按 embed id 提供已解码图片。 */
 export function drawSlide(
   ctx: CanvasRenderingContext2D,
@@ -108,6 +148,26 @@ export function drawSlide(
     const w = shape.width * scale;
     const h = shape.height * scale;
 
+    // 旋转/翻转:绕形状中心做仿射变换
+    const rot = shape.rotation ?? 0;
+    const needXform = rot !== 0 || shape.flip_h || shape.flip_v;
+    if (needXform) {
+      ctx.save();
+      const cx = x + w / 2;
+      const cy = y + h / 2;
+      ctx.translate(cx, cy);
+      if (rot) ctx.rotate((rot * Math.PI) / 180);
+      ctx.scale(shape.flip_h ? -1 : 1, shape.flip_v ? -1 : 1);
+      ctx.translate(-cx, -cy);
+    }
+
+    // 内嵌对象(图表/SmartArt/表格)占位
+    if (shape.placeholder_kind) {
+      drawPlaceholderKind(ctx, shape.placeholder_kind, x, y, w, h, scale);
+      if (needXform) ctx.restore();
+      continue;
+    }
+
     // 图片
     if (shape.image) {
       const img = images.get(shape.image);
@@ -117,6 +177,7 @@ export function drawSlide(
         ctx.strokeStyle = "#d0d7de";
         ctx.strokeRect(x, y, w, h);
       }
+      if (needXform) ctx.restore();
       continue;
     }
 
@@ -143,6 +204,8 @@ export function drawSlide(
     if (shape.paragraphs.length > 0) {
       drawShapeText(ctx, shape, scale);
     }
+
+    if (needXform) ctx.restore();
   }
 }
 

@@ -163,13 +163,17 @@ export function PptPage() {
   );
 
   const busy = status === "loading";
+  const curSlide = docRef.current?.presentation.slides[current];
+  const hasAnim = curSlide?.has_animation ?? false;
+  const hasTrans = curSlide?.has_transition ?? false;
 
   return (
     <section className="office-page" aria-label="演示 · PowerPoint">
       <header className="office-page__header">
         <h2>演示 · PowerPoint</h2>
         <p className="office-page__subtitle">
-          上传 .pptx 文件,在 canvas 上渲染幻灯:文本框、图片、自选图形与对齐。
+          上传 .pptx 文件,在 canvas 上渲染幻灯:文本框、图片、自选图形与对齐;
+          形状旋转/翻转、图表/SmartArt 占位、动画/切换徽标。
           解析在 Rust/WASM 侧完成。支持缩略图导航与全屏演示模式。
         </p>
       </header>
@@ -258,6 +262,16 @@ export function PptPage() {
                 <span data-testid="ppt-page">
                   {current + 1} / {slideCount}
                 </span>
+                {hasTrans && (
+                  <span className="ppt-badge" data-testid="ppt-badge-transition" title="含切换效果">
+                    切换
+                  </span>
+                )}
+                {hasAnim && (
+                  <span className="ppt-badge" data-testid="ppt-badge-animation" title="含动画">
+                    动画
+                  </span>
+                )}
                 <button type="button" onClick={() => go(1)} disabled={current >= slideCount - 1}>
                   下一张 ▶
                 </button>

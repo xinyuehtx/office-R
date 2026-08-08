@@ -14,6 +14,9 @@ test.describe("PPT 只读:渲染 / 导航 / 演示模式", () => {
     // 翻到第二页
     await page.getByRole("button", { name: /下一张/ }).click();
     await expect(page.getByTestId("ppt-page")).toContainText("2 / 2");
+    // 第二页含切换 + 动画标记(fixture 里带 transition/timing)
+    await expect(page.getByTestId("ppt-badge-transition")).toBeVisible();
+    await expect(page.getByTestId("ppt-badge-animation")).toBeVisible();
   });
 
   test("演示模式:进入全屏,方向键翻页,Esc 退出", async ({ page }) => {

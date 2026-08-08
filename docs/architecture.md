@@ -255,12 +255,15 @@ CSV 表格页的落地:含 `=` 单元格的文件由 `formula::evaluate_sheet` �
 见 [RFC-0006](./rfcs/0006-word-excel-ppt-readonly.md)。两条与表格并列的渲染管线,同样「重 CPU 在
 Rust、canvas 虚拟化 + 多级缓存」:
 
-- **Word**:`docx.rs` 用 `docx-rs` 读路径抽出平面化模型(段落/run/标题/对齐/列表/内联图片/表格);
-  `web/word/wordLayout` 做**流式布局**产出带绝对 y 的绘制项,`WordPage` 用 **sticky canvas + spacer**
-  纵向虚拟化(只画视口内的项)。字号/颜色经 serde 读 docx-rs 私有字段;图片字节 → Blob object URL。
-- **PPT**:`pptx.rs` 直接用 `zip + quick-xml` 解析 PresentationML(尺寸/顺序 → rels → spTree 形状/图片),
-  用元素名栈区分 spPr 填充与 rPr 颜色,EMU÷9525;`web/ppt/slideRender` 按 `fitScale` 等比铺进画布
-  (形状几何/填充、文本折行+对齐、图片),`PptPage` 提供缩略图导航、翻页与**全屏演示模式**。
+- **Word**:`docx.rs` 用 `docx-rs` 读路径抽出平面化模型(段落/run/标题/对齐/列表/内联图片/表格、
+  **分栏 `sectPr`、页眉页脚、修订 ins/del 标记**);`web/word/wordLayout` 做**流式布局**产出带绝对 y
+  的绘制项(分栏为贪心分配、页眉页脚各带分隔线、修订插入蓝色/删除红色+删除线),`WordPage` 用
+  **sticky canvas + spacer** 纵向虚拟化(只画视口内的项)。字号/颜色经 serde 读 docx-rs 私有字段;图片字节 → Blob object URL。
+- **PPT**:`pptx.rs` 直接用 `zip + quick-xml` 解析 PresentationML(尺寸/顺序 → rels → spTree 形状/图片,
+  **旋转/翻转 `xfrm@rot/flipH/flipV`、母版 `txStyles` 文本默认样式继承、`graphicFrame` 图表/SmartArt 占位、
+  `timing`/`transition` 动画/切换标记**),用元素名栈区分 spPr 填充与 rPr 颜色,EMU÷9525;
+  `web/ppt/slideRender` 按 `fitScale` 等比铺进画布(形状几何/填充、文本折行+对齐、图片、旋转仿射变换、
+  图表/SmartArt 虚线占位框+类型标签),`PptPage` 提供缩略图导航、翻页(含动画/切换徽标)与**全屏演示模式**。
 - **共享文本测量**(`web/shared/textMeasure.ts`):参考 pretext,`font→segment` 两级缓存 +
   OffscreenCanvas + 字体加载失效 + 二分裁剪 + 折行,三个页面共用一个实例。
 

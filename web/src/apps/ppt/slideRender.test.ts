@@ -39,9 +39,13 @@ function fakeCtx() {
       stroke: () => calls.push("stroke"),
       strokeRect: () => calls.push("strokeRect"),
       fillText: (t: string) => calls.push(`fillText:${t}`),
-      save: () => {},
-      restore: () => {},
+      measureText: (t: string) => ({ width: t.length * 8 }),
+      setLineDash: () => {},
+      save: () => calls.push("save"),
+      restore: () => calls.push("restore"),
       translate: () => {},
+      rotate: () => calls.push("rotate"),
+      scale: () => calls.push("scale"),
     } as unknown as CanvasRenderingContext2D,
   };
 }
@@ -123,5 +127,72 @@ describe("drawSlide", () => {
     const img = { complete: true, naturalWidth: 10 } as HTMLImageElement;
     drawSlide(ctx, slide, 1, new Map([["rId1", img]]));
     expect(drawImage).toHaveBeenCalled();
+  });
+
+  it("图表占位画虚线框 + 类型标签", () => {
+    const slide: Slide = {
+      shapes: [
+        {
+          x: 0,
+          y: 0,
+          width: 200,
+          height: 100,
+          geom: null,
+          fill: null,
+          image: null,
+          paragraphs: [],
+          placeholder_kind: "chart",
+        },
+      ],
+    };
+    const { ctx, calls } = fakeCtx();
+    drawSlide(ctx, slide, 1, new Map());
+    expect(calls).toContain("strokeRect");
+    expect(calls.some((c) => c.startsWith("fillText:图表"))).toBe(true);
+  });
+
+  it("SmartArt 占位标签为 SmartArt", () => {
+    const slide: Slide = {
+      shapes: [
+        {
+          x: 0,
+          y: 0,
+          width: 200,
+          height: 100,
+          geom: null,
+          fill: null,
+          image: null,
+          paragraphs: [],
+          placeholder_kind: "diagram",
+        },
+      ],
+    };
+    const { ctx, calls } = fakeCtx();
+    drawSlide(ctx, slide, 1, new Map());
+    expect(calls.some((c) => c.startsWith("fillText:SmartArt"))).toBe(true);
+  });
+
+  it("旋转/翻转形状发出 rotate/scale 变换", () => {
+    const slide: Slide = {
+      shapes: [
+        {
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 50,
+          geom: "rect",
+          fill: "FF0000",
+          image: null,
+          paragraphs: [],
+          rotation: 90,
+          flip_h: true,
+        },
+      ],
+    };
+    const { ctx, calls } = fakeCtx();
+    drawSlide(ctx, slide, 1, new Map());
+    expect(calls).toContain("rotate");
+    expect(calls).toContain("scale");
+    expect(calls).toContain("restore");
   });
 });

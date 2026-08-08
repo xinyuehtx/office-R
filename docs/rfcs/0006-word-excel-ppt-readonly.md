@@ -68,11 +68,17 @@
 - ✅ **自动化 e2e**:引入 `@playwright/test`,覆盖 word/excel(公式/过滤/冻结)/ppt(渲染/翻页/演示)。
 - ✅ **wasm 瘦身**:`docx-rs` 主依赖 `default-features=false`(image 特性移到 dev-dependency),WASM 1807KB → 1114KB(−38%)。
 
-**仍非目标(本期不做):**
+**仍非目标(已在第二轮 polish 补齐,见 [报告-0008](../reports/0008-office-readonly-polish-2.md)):**
 
-- Word:分栏、页眉页脚、修订/批注、精确行距缩进。
-- PPT:动画/切换、SmartArt/图表、组合形状子坐标、旋转翻转、自定义几何、文本默认样式继承。
-- Excel numfmt:颜色码 `[Red]`、条件 `[>=100]`、分数。
+- ✅ Word:分栏、页眉页脚、修订(插入/删除标记)。
+- ✅ PPT:动画/切换标记、图表/SmartArt 占位、旋转/翻转、文本默认样式继承。
+- ✅ Excel numfmt:颜色码 `[Red]`、条件 `[>=100]`、分数 `?/?`。
+
+**当前边界(暂不做):**
+
+- Word:批注、精确行距缩进、分栏的平衡分页。
+- PPT:动画时间线回放、图表/SmartArt 真实绘制、组合形状子坐标、自定义几何。
+- Excel numfmt:更少见的地区/日历格式码。
 
 ## 影响
 

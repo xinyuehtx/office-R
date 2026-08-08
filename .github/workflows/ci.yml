@@ -79,3 +79,47 @@ jobs:
 
       - name: 构建
         run: pnpm -C web build
+
+  e2e:
+    name: 浏览器端到端(Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust(wasm target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: 缓存 cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: 安装 wasm-pack
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+
+      - name: 构建 WASM(供前端引用)
+        run: wasm-pack build crates/wasm --target web --out-dir ../../web/src/wasm/pkg --out-name office_wasm
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 生成 e2e 夹具(从 Rust 内核构造 docx/pptx)
+        run: pnpm -C web e2e:fixtures
+
+      - name: 安装 Playwright 浏览器(chromium)
+        run: pnpm -C web exec playwright install --with-deps chromium
+
+      - name: 端到端测试
+        run: pnpm -C web e2e

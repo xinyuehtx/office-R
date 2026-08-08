@@ -29,14 +29,17 @@
   (见 [RFC-0005](./docs/rfcs/0005-view-filter-freeze.md) / [RFC-0006](./docs/rfcs/0006-word-excel-ppt-readonly.md))
 
 **文档 · Word**:上传 `.docx`,在 canvas 上**流式布局渲染**——标题、正文、加粗/斜体/颜色、
-段落对齐、列表、图片、表格与图文混排;长文档纵向虚拟化。解析(docx-rs 读路径)在 Rust/WASM。
+段落对齐、列表、图片、表格与图文混排;**分栏、页眉页脚、修订(插入/删除)标记**;长文档纵向虚拟化。
+解析(docx-rs 读路径)在 Rust/WASM。
 
 **演示 · PowerPoint**:上传 `.pptx`,在 canvas 上渲染幻灯——文本框、图片、自选图形与对齐;
-缩略图导航 + **全屏演示模式**(方向键/Esc)。解析(zip + quick-xml 直接解析 OOXML)在 Rust/WASM。
+**形状旋转/翻转、图表/SmartArt 占位、动画/切换徽标**;缩略图导航 + **全屏演示模式**(方向键/Esc)。
+解析(zip + quick-xml 直接解析 OOXML)在 Rust/WASM。
 
 三个应用共用一套**文本测量缓存**(参考 pretext:canvas measureText + 分级缓存 + 字体加载失效)。
-Word 列表区分**有序/无序**(查 numbering.xml)并支持**两端对齐**;PPT 占位符**继承版式/母版几何**、
-解析**主题配色**;并有 **Playwright 浏览器 e2e**(`pnpm -C web e2e`)覆盖三应用在线渲染。
+Word 列表区分**有序/无序**(查 numbering.xml)并支持**两端对齐**;Excel 数字格式支持**颜色码/条件段/分数**;
+PPT 占位符**继承版式/母版几何**、解析**主题配色**并**继承母版文本默认样式**;并有 **Playwright 浏览器 e2e**
+(`pnpm -C web e2e`)覆盖三应用在线渲染。
 
 ## 快速开始
 

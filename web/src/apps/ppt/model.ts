@@ -29,10 +29,21 @@ export interface Shape {
   /** 图片 embed id(在其幻灯内唯一)。 */
   image: string | null;
   paragraphs: Para[];
+  /** 旋转角度(度,顺时针)。 */
+  rotation?: number;
+  /** 水平/垂直翻转。 */
+  flip_h?: boolean;
+  flip_v?: boolean;
+  /** 内嵌对象占位类型:"chart" / "diagram" / "table";普通形状为 null。 */
+  placeholder_kind?: string | null;
 }
 
 export interface Slide {
   shapes: Shape[];
+  /** 是否含动画(p:timing)。 */
+  has_animation?: boolean;
+  /** 是否含切换效果(p:transition)。 */
+  has_transition?: boolean;
 }
 
 export interface Presentation {

@@ -598,6 +598,15 @@
   cursor: default;
 }
 
+.ppt-badge {
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: #ddf4ff;
+  color: #0969da;
+  font-size: 12px;
+  border: 1px solid #b6e3ff;
+}
+
 /* 演示模式:铺满视口 */
 .ppt-layout--present {
   position: fixed;
