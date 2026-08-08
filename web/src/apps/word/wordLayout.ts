@@ -138,7 +138,10 @@ function layoutParagraph(
   out: DrawItem[],
 ): number {
   const base = paragraphBaseFont(p);
-  const listIndent = p.list ? (p.list.level + 1) * LIST_INDENT : 0;
+  // 段前间距
+  y += p.space_before_px ?? 0;
+  const extraIndent = p.indent_px ?? 0;
+  const listIndent = (p.list ? (p.list.level + 1) * LIST_INDENT : 0) + extraIndent;
   const left = x0 + listIndent;
   const avail = Math.max(10, contentWidth - listIndent);
 
@@ -195,7 +198,7 @@ function layoutParagraph(
         maxImgH = Math.max(maxImgH, t.height);
       }
     }
-    const textH = maxPx * LINE_SPACING;
+    const textH = maxPx * (p.line_pct ?? LINE_SPACING);
     const lineH = Math.max(textH, maxImgH + 4);
     const baselineY = y + lineH / 2;
 
@@ -258,7 +261,7 @@ function layoutParagraph(
     y += lineH;
   }
 
-  return y + base.gap;
+  return y + base.gap + (p.space_after_px ?? 0);
 }
 
 /** 表格布局:等宽列,单元格递归布局,行高取单元格最大高。 */

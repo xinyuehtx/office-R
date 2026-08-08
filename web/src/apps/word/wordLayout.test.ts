@@ -245,4 +245,21 @@ describe("wordLayout · 页眉页脚 + 分栏 + 修订", () => {
     // 脚注分隔线为 height=0 的 rect
     expect(layout.items.some((i) => i.kind === "rect" && i.height === 0)).toBe(true);
   });
+
+  it("缩进 + 段前间距:首行右移且下移", () => {
+    const plain = layoutDoc({ blocks: [para([run("普通")])] }, 820, measurer);
+    const indented = layoutDoc(
+      { blocks: [para([run("缩进")], { indent_px: 60, space_before_px: 30 })] },
+      820,
+      measurer,
+    );
+    const p0 = plain.items.find((i) => i.kind === "textline");
+    const i0 = indented.items.find((i) => i.kind === "textline");
+    if (p0?.kind === "textline" && i0?.kind === "textline") {
+      // 左缩进:首段起点右移约 60
+      expect(i0.segments[0].x - p0.segments[0].x).toBeGreaterThan(55);
+      // 段前间距:首行 y 更靠下
+      expect(i0.y).toBeGreaterThan(p0.y + 25);
+    }
+  });
 });

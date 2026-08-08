@@ -9,8 +9,9 @@
 //!
 //! 覆盖范围(本期只读):文字、加粗/斜体/下划线、字号/颜色、标题(Heading1-6)、
 //! 段落对齐、项目符号/编号列表、内联图片、表格、图文混排、分栏、页眉页脚、
-//! 修订(插入/删除)、超链接(蓝色下划线)、脚注(文末汇总 + 引用标记 `[n]`)。
-//! **非目标**:文本框绘图、公式对象、批注、精确行距/缩进。
+//! 修订(插入/删除)、超链接(蓝色下划线)、脚注(文末汇总 + 引用标记 `[n]`)、
+//! 左缩进 / 段前段后间距 / 行距倍数。
+//! **非目标**:文本框绘图、公式对象(OMML)、批注、域/目录(TOC)。
 
 use serde::Serialize;
 
@@ -110,6 +111,18 @@ pub struct Paragraph {
     pub list: Option<ListItem>,
     /// 内联内容。
     pub inlines: Vec<Inline>,
+    /// 左缩进(像素;`w:ind@start` twips ÷ 15)。
+    #[serde(default)]
+    pub indent_px: f64,
+    /// 段前间距(像素;`w:spacing@before` twips ÷ 15)。
+    #[serde(default)]
+    pub space_before_px: f64,
+    /// 段后间距(像素;`w:spacing@after` twips ÷ 15)。
+    #[serde(default)]
+    pub space_after_px: f64,
+    /// 行距倍数(`w:spacing@line` 的 Auto 规则:line ÷ 240);无则视图用默认。
+    #[serde(default)]
+    pub line_pct: Option<f64>,
 }
 
 /// 表格单元格(可含多段落 / 嵌套块)。
@@ -280,6 +293,10 @@ fn collect_footnotes(docx: &Docx) -> Vec<Block> {
                 revision: Revision::None,
                 link: None,
             })],
+            indent_px: 0.0,
+            space_before_px: 0.0,
+            space_after_px: 0.0,
+            line_pct: None,
         }));
     }
     out
@@ -425,6 +442,21 @@ fn convert_paragraph(p: &DxParagraph, ctx: &mut Ctx) -> Paragraph {
         .map(|j| align_of(&justification_str(j)))
         .unwrap_or(Align::Left);
 
+    // 左缩进(twips ÷ 15 = px);start 优先,负值夹到 0
+    let indent_px = prop
+        .indent
+        .as_ref()
+        .and_then(|i| i.start)
+        .map(|t| (t as f64 / 15.0).max(0.0))
+        .unwrap_or(0.0);
+
+    // 行距 / 段间距:LineSpacing 字段私有,经 serde 取 {before, after, line, lineRule}
+    let (space_before_px, space_after_px, line_pct) = prop
+        .line_spacing
+        .as_ref()
+        .map(parse_line_spacing)
+        .unwrap_or((0.0, 0.0, None));
+
     // 列表:查 numbering 定 有序/无序;有序则按 (numId, level) 递增算序号
     let list = prop.numbering_property.as_ref().map(|np| {
         let level = np.level.as_ref().map(|l| l.val).unwrap_or(0);
@@ -486,7 +518,36 @@ fn convert_paragraph(p: &DxParagraph, ctx: &mut Ctx) -> Paragraph {
         align,
         list,
         inlines,
+        indent_px,
+        space_before_px,
+        space_after_px,
+        line_pct,
     }
+}
+
+/// 从 docx-rs `LineSpacing`(字段私有)经 serde 抽出 (段前 px, 段后 px, 行距倍数)。
+/// `before`/`after` 为 twips;`line` 在 Auto 规则下是 240ths(line÷240 = 倍数)。
+fn parse_line_spacing(ls: &docx_rs::LineSpacing) -> (f64, f64, Option<f64>) {
+    let v = match serde_json::to_value(ls) {
+        Ok(v) => v,
+        Err(_) => return (0.0, 0.0, None),
+    };
+    let twips_px = |key: &str| {
+        v.get(key)
+            .and_then(|x| x.as_f64())
+            .map(|t| t / 15.0)
+            .unwrap_or(0.0)
+    };
+    let before = twips_px("before");
+    let after = twips_px("after");
+    // lineRule 缺省视为 auto;line/240 = 行距倍数(仅 auto 有意义)
+    let rule = v.get("lineRule").and_then(|x| x.as_str()).unwrap_or("auto");
+    let line_pct = if rule == "auto" || rule == "atLeast" {
+        v.get("line").and_then(|x| x.as_f64()).map(|l| l / 240.0)
+    } else {
+        None
+    };
+    (before, after, line_pct)
 }
 
 /// 解析超链接目标:外部链接经 `document_rels` 把 rId 映射为 URL;锚点返回 `#anchor`。
@@ -684,7 +745,7 @@ mod tests {
     use super::{parse, Align, Block, Inline, Paragraph, Revision};
     use docx_rs::{
         AbstractNumbering, AlignmentType, Delete, Docx, Footer, Header, IndentLevel, Insert, Level,
-        LevelJc, LevelText, NumberFormat, Numbering, NumberingId, Paragraph as DxPara,
+        LevelJc, LevelText, LineSpacing, NumberFormat, Numbering, NumberingId, Paragraph as DxPara,
         Run as DxRun, Start, Table as DxTable, TableCell as DxCell, TableRow as DxRow,
     };
 
@@ -865,6 +926,37 @@ mod tests {
             ),
             Some("#sec1".to_string())
         );
+    }
+
+    #[test]
+    fn parses_indent_and_spacing() {
+        let mut buf = Vec::new();
+        Docx::new()
+            .add_paragraph(
+                DxPara::new()
+                    .indent(Some(720), None, None, None) // 720 twips = 48px
+                    .line_spacing(LineSpacing::new().before(240).after(120).line(360))
+                    .add_run(DxRun::new().add_text("缩进段")),
+            )
+            .build()
+            .pack(&mut std::io::Cursor::new(&mut buf))
+            .expect("打包");
+        let parsed = parse(&buf).expect("解析");
+        let Block::Paragraph(p) = &parsed.doc.blocks[0] else {
+            panic!("应为段落");
+        };
+        assert!((p.indent_px - 48.0).abs() < 0.01, "indent={}", p.indent_px);
+        assert!(
+            (p.space_before_px - 16.0).abs() < 0.01,
+            "before={}",
+            p.space_before_px
+        );
+        assert!(
+            (p.space_after_px - 8.0).abs() < 0.01,
+            "after={}",
+            p.space_after_px
+        );
+        assert_eq!(p.line_pct, Some(1.5), "line 360/240 = 1.5x");
     }
 
     #[test]

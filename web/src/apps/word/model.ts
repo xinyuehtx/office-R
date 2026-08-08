@@ -50,6 +50,14 @@ export interface Paragraph {
   align: Align;
   list: ListItem | null;
   inlines: Inline[];
+  /** 左缩进(像素);缺省 0。 */
+  indent_px?: number;
+  /** 段前间距(像素);缺省 0。 */
+  space_before_px?: number;
+  /** 段后间距(像素);缺省 0。 */
+  space_after_px?: number;
+  /** 行距倍数;缺省用默认行距。 */
+  line_pct?: number | null;
 }
 
 export interface TableCell {
