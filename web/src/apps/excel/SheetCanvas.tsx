@@ -25,7 +25,8 @@ interface SheetCanvasProps {
 type DragMode =
   | { kind: "none" }
   | { kind: "pan"; lastX: number; lastY: number; moved: boolean; startX: number; startY: number }
-  | { kind: "scrollbar"; axis: "x" | "y"; grabOffset: number };
+  | { kind: "scrollbar"; axis: "x" | "y"; grabOffset: number }
+  | { kind: "col-resize"; col: number; startX: number; startWidth: number };
 
 /**
  * canvas 表格视图。
@@ -325,7 +326,21 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
       }
     }
 
-    // 2) 否则进入「可能是拖拽平移,也可能只是点击选中」的状态
+    // 2) 列头右边界:进入列宽拖拽
+    const resizeCol = renderer.columnResizeHitTest(x, y);
+    if (resizeCol !== null) {
+      dragRef.current = {
+        kind: "col-resize",
+        col: resizeCol,
+        startX: x,
+        startWidth: renderer.getColumnWidthCss(resizeCol),
+      };
+      event.currentTarget.style.cursor = "col-resize";
+      event.currentTarget.setPointerCapture(event.pointerId);
+      return;
+    }
+
+    // 3) 否则进入「可能是拖拽平移,也可能只是点击选中」的状态
     dragRef.current = { kind: "pan", lastX: x, lastY: y, startX: x, startY: y, moved: false };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
@@ -347,6 +362,12 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
       return;
     }
 
+    if (drag.kind === "col-resize") {
+      const next = Math.max(24, drag.startWidth + (x - drag.startX));
+      renderer.setColumnWidth(drag.col, next);
+      return;
+    }
+
     if (drag.kind === "pan") {
       const dx = x - drag.lastX;
       const dy = y - drag.lastY;
@@ -361,7 +382,10 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
       return;
     }
 
-    // 空闲状态下更新 hover —— 只重画覆盖层,代价很低
+    // 空闲状态下更新 hover —— 只重画覆盖层,代价很低。
+    // 悬停到列头右边界时给出 col-resize 光标提示。
+    const overBorder = renderer.columnResizeHitTest(x, y) !== null;
+    event.currentTarget.style.cursor = overBorder ? "col-resize" : "";
     const hit = renderer.hitTest(x, y);
     renderer.setHover(hit.kind === "cell" ? { row: hit.row, col: hit.col } : null);
   };

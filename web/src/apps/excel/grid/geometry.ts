@@ -111,7 +111,17 @@ export interface LayoutInput {
   frozenRows?: number;
   /** 冻结左侧列数(默认 0)。 */
   frozenCols?: number;
+  /**
+   * 列宽**手动覆盖**(基准 px,未乘缩放;`undefined`/`<=0` 表示该列用自动宽度)。
+   *
+   * 用户拖拽列头右边界调整列宽时写入;覆盖值放宽上限(比自动宽度可更宽),
+   * 仍受最小宽度约束以免拖没。
+   */
+  colWidthOverrides?: ArrayLike<number | undefined>;
 }
+
+/** 手动列宽的上限(基准 px):比自动宽度上限宽得多,给用户足够拖拽空间。 */
+const MANUAL_MAX_COL_WIDTH = 1600;
 
 /**
  * 计算布局。
@@ -127,6 +137,7 @@ export function computeLayout({
   snap = false,
   frozenRows = 0,
   frozenCols = 0,
+  colWidthOverrides,
 }: LayoutInput): GridLayout {
   const safeZoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
   const safeCols = Math.max(0, Math.floor(cols));
@@ -135,9 +146,15 @@ export function computeLayout({
 
   const colOffsets = new Float64Array(safeCols + 1);
   for (let c = 0; c < safeCols; c += 1) {
-    const units = Number(colWidthUnits[c] ?? 0);
-    const raw = units * BASE_CHAR_WIDTH + BASE_CELL_PADDING * 2;
-    const clamped = Math.min(MAX_COL_WIDTH, Math.max(MIN_COL_WIDTH, raw));
+    const override = colWidthOverrides?.[c];
+    let clamped: number;
+    if (override != null && override > 0) {
+      clamped = Math.min(MANUAL_MAX_COL_WIDTH, Math.max(MIN_COL_WIDTH, override));
+    } else {
+      const units = Number(colWidthUnits[c] ?? 0);
+      const raw = units * BASE_CHAR_WIDTH + BASE_CELL_PADDING * 2;
+      clamped = Math.min(MAX_COL_WIDTH, Math.max(MIN_COL_WIDTH, raw));
+    }
     colOffsets[c + 1] = colOffsets[c] + round(clamped * safeZoom);
   }
 

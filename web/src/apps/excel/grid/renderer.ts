@@ -222,6 +222,8 @@ export class GridRenderer {
   /** 冻结的顶部行数 / 左侧列数(0 表示不冻结)。 */
   private frozenRows = 0;
   private frozenCols = 0;
+  /** 列宽手动覆盖(基准 px,按列号索引;0/undefined 表示自动)。 */
+  private colWidthOverrides: number[] = [];
   private layout: GridLayout = computeLayout({ rows: 0, cols: 0, colWidthUnits: [], zoom: 1 });
 
   /** 设备像素比。 */
@@ -339,6 +341,7 @@ export class GridRenderer {
     this.scroll = { x: 0, y: 0 };
     this.selection = sheet && sheet.rows > 0 ? { row: 0, col: 0 } : null;
     this.hover = null;
+    this.colWidthOverrides = [];
     this.windowCache = null;
     this.tile = null;
     this.sheetSetAt = this.now();
@@ -522,6 +525,51 @@ export class GridRenderer {
     this.invalidate("overlay");
   }
 
+  /** 某列当前宽度(CSS 像素)。 */
+  getColumnWidthCss(col: number): number {
+    this.ensureLayout();
+    const { colOffsets } = this.layout;
+    if (col < 0 || col + 1 >= colOffsets.length) return 0;
+    return (colOffsets[col + 1] - colOffsets[col]) / this.dpr;
+  }
+
+  /**
+   * 命中列头右边界的「调整手柄」:返回可拖拽调整宽度的列号,否则 `null`。
+   *
+   * 只在列头区(`y < headerHeight`)内、且指针距某列右边界 `tolCss` 像素内时命中。
+   */
+  columnResizeHitTest(cssX: number, cssY: number, tolCss = 4): number | null {
+    this.ensureLayout();
+    const layout = this.layout;
+    const x = cssX * this.dpr;
+    const y = cssY * this.dpr;
+    if (y < 0 || y > layout.headerHeight) return null;
+    if (x < layout.headerWidth) return null;
+    const tol = tolCss * this.dpr;
+
+    const { colOffsets, cols, frozenCols, frozenWidth } = layout;
+    // 冻结列:边界固定不随滚动;其余列减去横向滚动
+    for (let c = 0; c < cols; c += 1) {
+      const isFrozen = c < frozenCols;
+      const border = layout.headerWidth + colOffsets[c + 1] - (isFrozen ? 0 : this.scroll.x);
+      // 非冻结列的边界不能落进冻结区里(被盖住)
+      if (!isFrozen && colOffsets[c + 1] - this.scroll.x < frozenWidth) continue;
+      if (Math.abs(x - border) <= tol) return c;
+    }
+    return null;
+  }
+
+  /** 手动设置某列宽度(CSS 像素);传 `undefined` 或 `<=0` 恢复自动宽度。 */
+  setColumnWidth(col: number, cssWidth: number | undefined): void {
+    if (col < 0) return;
+    // 覆盖值存基准 px(未乘缩放),与自动宽度同空间;computeLayout 再乘 zoom*dpr
+    const basePx = cssWidth != null && cssWidth > 0 ? cssWidth / this.zoom : 0;
+    this.colWidthOverrides[col] = basePx;
+    this.tile = null;
+    this.windowCache = null;
+    this.invalidateLayout();
+  }
+
   /** 当前选中单元格。 */
   getSelection(): CellRef | null {
     return this.selection;
@@ -666,6 +714,7 @@ export class GridRenderer {
       snap: true,
       frozenRows: this.frozenRows,
       frozenCols: this.frozenCols,
+      colWidthOverrides: this.colWidthOverrides,
     });
     this.layoutDirty = false;
     this.scroll = clampScroll(this.layout, this.viewport, this.scroll);

@@ -83,6 +83,30 @@ describe("computeLayout", () => {
     expect(layout.zoom).toBe(1);
     expect(Number.isFinite(layout.totalWidth)).toBe(true);
   });
+
+  it("手动列宽覆盖:指定列用覆盖宽度,其余列仍按自动", () => {
+    const layout = computeLayout({
+      rows: 1,
+      cols: 3,
+      colWidthUnits: [0, 0, 0], // 自动各夹到 MIN_COL_WIDTH(48)
+      zoom: 1,
+      colWidthOverrides: [undefined, 200, 0], // 仅第 1 列覆盖为 200
+    });
+    expect(layout.colOffsets[1] - layout.colOffsets[0]).toBe(MIN_COL_WIDTH);
+    expect(layout.colOffsets[2] - layout.colOffsets[1]).toBe(200);
+    expect(layout.colOffsets[3] - layout.colOffsets[2]).toBe(MIN_COL_WIDTH);
+  });
+
+  it("手动列宽仍受最小宽度约束", () => {
+    const layout = computeLayout({
+      rows: 1,
+      cols: 1,
+      colWidthUnits: [10],
+      zoom: 1,
+      colWidthOverrides: [5], // 小于 MIN_COL_WIDTH
+    });
+    expect(layout.colOffsets[1]).toBe(MIN_COL_WIDTH);
+  });
 });
 
 describe("colAtOffset / rowAtOffset", () => {
