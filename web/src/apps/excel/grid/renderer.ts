@@ -75,6 +75,7 @@ import {
   paintOverlay,
   TextFitter,
   type CellTextSource,
+  type StyleAt,
 } from "./layers";
 import {
   anchorTile,
@@ -688,6 +689,13 @@ export class GridRenderer {
 
   // ---------- 管线实现 ----------
 
+  /** 当前表格的每格样式查询(xlsx);无样式源时返回 undefined。 */
+  private styleAt(): StyleAt | undefined {
+    const sheet = this.sheet;
+    if (!sheet || typeof sheet.cellStyle !== "function") return undefined;
+    return (r, c) => sheet.cellStyle!(r, c);
+  }
+
   private applyScroll(next: Scroll): void {
     this.ensureLayout();
     // 取整到设备像素:位图平移与 transform 都必须是整像素,否则会重采样发虚
@@ -978,6 +986,7 @@ export class GridRenderer {
         scroll: { x: target.originX, y: target.originY },
         source: this.windowCache,
         fitter: this.fitter,
+        styleAt: this.styleAt(),
       });
       this.stats.fullRepaints += 1;
     }
@@ -1015,6 +1024,7 @@ export class GridRenderer {
         scroll: { x: next.originX, y: next.originY },
         source: this.windowCache!,
         fitter: this.fitter,
+        styleAt: this.styleAt(),
       });
       this.stats.fullRepaints += 1;
       return;
@@ -1036,6 +1046,7 @@ export class GridRenderer {
         source: this.windowCache!,
         fitter: this.fitter,
         dirty: rect,
+        styleAt: this.styleAt(),
       });
     }
   }

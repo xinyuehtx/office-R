@@ -234,7 +234,24 @@ export async function loadXlsx(bytes: Uint8Array): Promise<XlsxWorkbookHandle> {
     openSheet(index: number): SheetHandle {
       const inner = wb.sheet(index);
       const formulas = wb.formulas(index) as CellFormula[];
-      return buildSheetHandle(inner, formulas);
+      const handle = buildSheetHandle(inner, formulas);
+      // xlsx 视觉样式 + 合并区
+      const styleList = wb.styles(index) as Array<
+        { row: number; col: number } & import("../apps/shared/sheet").CellStyle
+      >;
+      const styleMap = new Map<string, import("../apps/shared/sheet").CellStyle>();
+      for (const s of styleList) {
+        styleMap.set(`${s.row},${s.col}`, {
+          bold: s.bold,
+          italic: s.italic,
+          color: s.color,
+          fill: s.fill,
+          align: s.align,
+        });
+      }
+      handle.cellStyle = (r, c) => styleMap.get(`${r},${c}`) ?? null;
+      handle.merges = wb.merges(index) as [number, number, number, number][];
+      return handle;
     },
     dispose() {
       wb.free();

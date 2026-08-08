@@ -7,9 +7,10 @@
 //! 单元格值 → 文本:数值按该格 **numfmt 格式码**渲染(自解析 `xl/styles.xml` 的
 //! `numFmts` + `cellXfs`,内置 id 与自定义码经 `numfmt` 内核格式化;百分比/千分位/货币/小数),
 //! 布尔归一为 `TRUE`/`FALSE`,日期序列数换算成 `YYYY-MM-DD[ HH:MM:SS]`(自实现,不引入 chrono)。
-//! 合并区(`mergeCells`)解析进 `XlsxSheet::merges`。
+//! 合并区(`mergeCells`)解析进 `XlsxSheet::merges`;单元格视觉样式(加粗/斜体/文字色/
+//! 填充背景/水平对齐,自解析 `fonts`/`fills`/`cellXfs`)进 `XlsxSheet::formats`,网格按格渲染。
 //!
-//! **非目标**:字体/填充/边框等**视觉样式的渲染**、合并区跨格视觉呈现(已解析,渲染待后续)。
+//! **非目标**:边框线渲染、合并区的跨格视觉合并(已解析,当前覆盖格留空)、条件格式。
 
 use std::io::{Cursor, Read};
 
@@ -32,6 +33,31 @@ pub struct XlsxSheet {
     pub formulas: Vec<CellFormula>,
     /// 合并单元格区域 `(row0, col0, row1, col1)`(0 基,含首尾)。
     pub merges: Vec<(u32, u32, u32, u32)>,
+    /// 非默认单元格样式:`(row, col, 样式)`。仅收录有加粗/斜体/颜色/填充/对齐的格。
+    pub formats: Vec<(u32, u32, CellFmt)>,
+}
+
+/// 单元格视觉样式(只读渲染用)。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CellFmt {
+    pub bold: bool,
+    pub italic: bool,
+    /// 文字色 `RRGGBB`。
+    pub color: Option<String>,
+    /// 填充背景 `RRGGBB`。
+    pub fill: Option<String>,
+    /// 水平对齐:`"left"`/`"center"`/`"right"`。
+    pub align: Option<String>,
+}
+
+impl CellFmt {
+    fn is_default(&self) -> bool {
+        !self.bold
+            && !self.italic
+            && self.color.is_none()
+            && self.fill.is_none()
+            && self.align.is_none()
+    }
 }
 
 /// 一个工作簿:按原始顺序的工作表列表。
@@ -48,7 +74,7 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
 
     // 另开一份 zip 自解析样式(calamine 稳定 API 不给每格格式)与合并区。
     let mut zip = ZipArchive::new(Cursor::new(bytes.to_vec())).ok();
-    let style_codes = zip.as_mut().map(read_styles).unwrap_or_default();
+    let styles = zip.as_mut().map(read_style_table).unwrap_or_default();
     let path_map = zip.as_mut().map(sheet_path_map).unwrap_or_default();
 
     let mut sheets = Vec::with_capacity(names.len());
@@ -62,13 +88,30 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
             _ => (std::collections::HashMap::new(), Vec::new()),
         };
 
-        let (sheet, formulas) =
-            build_sheet(&values, formulas_range.as_ref(), &cell_styles, &style_codes);
+        let (sheet, formulas) = build_sheet(
+            &values,
+            formulas_range.as_ref(),
+            &cell_styles,
+            &styles.codes,
+        );
+
+        // 每格视觉样式(仅非默认)
+        let mut formats = Vec::new();
+        for (&(r, c), &s) in &cell_styles {
+            if let Some(fmt) = styles.fmts.get(s) {
+                if !fmt.is_default() {
+                    formats.push((r, c, fmt.clone()));
+                }
+            }
+        }
+        formats.sort_by_key(|&(r, c, _)| (r, c));
+
         sheets.push(XlsxSheet {
             name,
             sheet,
             formulas,
             merges,
+            formats,
         });
     }
 
@@ -188,20 +231,43 @@ fn attr(e: &BytesStart, key: &str) -> Option<String> {
     })
 }
 
-/// 解析 `xl/styles.xml`:得到 cellXfs 索引 → numfmt 格式码(None=General/日期/文本)。
-fn read_styles(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> Vec<Option<String>> {
+/// 样式表:每个 cellXfs 索引 → (numfmt 格式码, 视觉样式)。
+#[derive(Default)]
+struct StyleTable {
+    codes: Vec<Option<String>>,
+    fmts: Vec<CellFmt>,
+}
+
+/// 解析 `xl/styles.xml`:numFmts + fonts + fills + cellXfs → 每个样式索引的
+/// numfmt 码与视觉样式(加粗/斜体/文字色/填充/对齐)。
+fn read_style_table(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> StyleTable {
     let xml = match zip_text(zip, "xl/styles.xml") {
         Some(x) => x,
-        None => return Vec::new(),
+        None => return StyleTable::default(),
     };
     let mut custom: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-    let mut codes: Vec<Option<String>> = Vec::new();
+    let mut fonts: Vec<(bool, bool, Option<String>)> = Vec::new(); // (bold, italic, color)
+    let mut fills: Vec<Option<String>> = Vec::new();
+    let mut table = StyleTable::default();
+
     let mut reader = XmlReader::from_str(&xml);
     let mut buf = Vec::new();
-    let mut in_cellxfs = false;
+    // 区段与「当前正在构建」的状态
+    let (mut in_fonts, mut in_fills, mut in_cellxfs) = (false, false, false);
+    let mut cur_font: Option<(bool, bool, Option<String>)> = None;
+    let mut cur_fill_solid = false;
+    let mut cur_fill_color: Option<String> = None;
+    let mut cur_xf: Option<(u32, usize, usize)> = None; // (numFmtId, fontId, fillId)
+    let mut cur_align: Option<String> = None;
+
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+            Ok(ev @ (Event::Start(_) | Event::Empty(_))) => {
+                let empty = matches!(ev, Event::Empty(_));
+                let e = match &ev {
+                    Event::Start(e) | Event::Empty(e) => e.clone(),
+                    _ => unreachable!(),
+                };
                 let n = local(&e);
                 match n.as_str() {
                     "numFmt" => {
@@ -212,28 +278,148 @@ fn read_styles(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> Vec<Option<String>> {
                             custom.insert(id, code);
                         }
                     }
+                    "fonts" => in_fonts = true,
+                    "fills" => in_fills = true,
                     "cellXfs" => in_cellxfs = true,
+                    "font" if in_fonts => {
+                        cur_font = Some((false, false, None));
+                        if empty {
+                            fonts.push((false, false, None));
+                            cur_font = None;
+                        }
+                    }
+                    "b" if cur_font.is_some() => {
+                        if let Some(f) = cur_font.as_mut() {
+                            f.0 = attr(&e, "val").as_deref() != Some("0");
+                        }
+                    }
+                    "i" if cur_font.is_some() => {
+                        if let Some(f) = cur_font.as_mut() {
+                            f.1 = attr(&e, "val").as_deref() != Some("0");
+                        }
+                    }
+                    "color" if cur_font.is_some() => {
+                        if let Some(rgb) = attr(&e, "rgb").map(|s| normalize_argb(&s)) {
+                            if let Some(f) = cur_font.as_mut() {
+                                f.2 = Some(rgb);
+                            }
+                        }
+                    }
+                    "fill" if in_fills => {
+                        cur_fill_solid = false;
+                        cur_fill_color = None;
+                        if empty {
+                            fills.push(None);
+                        }
+                    }
+                    "patternFill" if in_fills => {
+                        cur_fill_solid = attr(&e, "patternType").as_deref() == Some("solid");
+                    }
+                    "fgColor" if in_fills && cur_fill_solid => {
+                        if let Some(rgb) = attr(&e, "rgb").map(|s| normalize_argb(&s)) {
+                            cur_fill_color = Some(rgb);
+                        }
+                    }
                     "xf" if in_cellxfs => {
-                        let id = attr(&e, "numFmtId")
+                        let numfmt = attr(&e, "numFmtId")
                             .and_then(|s| s.parse::<u32>().ok())
                             .unwrap_or(0);
-                        let code = custom.get(&id).cloned().or_else(|| builtin_numfmt(id));
-                        codes.push(code);
+                        let font_id = attr(&e, "fontId")
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        let fill_id = attr(&e, "fillId")
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if empty {
+                            push_xf(
+                                &mut table, &custom, &fonts, &fills, numfmt, font_id, fill_id, None,
+                            );
+                        } else {
+                            cur_xf = Some((numfmt, font_id, fill_id));
+                            cur_align = None;
+                        }
+                    }
+                    "alignment" if cur_xf.is_some() => {
+                        cur_align = attr(&e, "horizontal");
                     }
                     _ => {}
                 }
             }
-            Ok(Event::End(e)) => {
-                if local_end(&e) == "cellXfs" {
-                    in_cellxfs = false;
+            Ok(Event::End(e)) => match local_end(&e).as_str() {
+                "fonts" => in_fonts = false,
+                "fills" => in_fills = false,
+                "cellXfs" => in_cellxfs = false,
+                "font" => {
+                    if let Some(f) = cur_font.take() {
+                        fonts.push(f);
+                    }
                 }
-            }
+                "fill" => {
+                    if in_fills {
+                        fills.push(cur_fill_color.take());
+                    }
+                }
+                "xf" => {
+                    if let Some((numfmt, font_id, fill_id)) = cur_xf.take() {
+                        push_xf(
+                            &mut table,
+                            &custom,
+                            &fonts,
+                            &fills,
+                            numfmt,
+                            font_id,
+                            fill_id,
+                            cur_align.take(),
+                        );
+                    }
+                }
+                _ => {}
+            },
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
         buf.clear();
     }
-    codes
+    table
+}
+
+/// 把一个 cellXfs 项归并成 (numfmt 码, CellFmt) 并压入表。
+#[allow(clippy::too_many_arguments)]
+fn push_xf(
+    table: &mut StyleTable,
+    custom: &std::collections::HashMap<u32, String>,
+    fonts: &[(bool, bool, Option<String>)],
+    fills: &[Option<String>],
+    numfmt_id: u32,
+    font_id: usize,
+    fill_id: usize,
+    align: Option<String>,
+) {
+    let code = custom
+        .get(&numfmt_id)
+        .cloned()
+        .or_else(|| builtin_numfmt(numfmt_id));
+    let (bold, italic, color) = fonts.get(font_id).cloned().unwrap_or((false, false, None));
+    let fill = fills.get(fill_id).cloned().flatten();
+    let align = align.and_then(|a| match a.as_str() {
+        "left" | "center" | "right" => Some(a),
+        _ => None,
+    });
+    table.codes.push(code);
+    table.fmts.push(CellFmt {
+        bold,
+        italic,
+        color,
+        fill,
+        align,
+    });
+}
+
+/// ARGB(`FFRRGGBB`)或 RGB(`RRGGBB`)→ 6 位 RRGGBB(大写)。非法返回原样上限 6 位。
+fn normalize_argb(s: &str) -> String {
+    let t = s.trim();
+    let hex = if t.len() == 8 { &t[2..] } else { t };
+    hex.to_uppercase()
 }
 
 /// End 事件本地名。
@@ -564,12 +750,12 @@ mod tests {
             // styles:cellXfs[0]=默认;cellXfs[1]=numFmtId 9(0%);cellXfs[2]=自定义 164
             put(
                 "xl/styles.xml",
-                r##"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.00"/></numFmts><cellXfs count="3"><xf numFmtId="0"/><xf numFmtId="9" applyNumberFormat="1"/><xf numFmtId="164" applyNumberFormat="1"/></cellXfs></styleSheet>"##,
+                r##"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.00"/></numFmts><fonts count="2"><font/><font><b/><color rgb="FFFF0000"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill></fills><cellXfs count="4"><xf numFmtId="0"/><xf numFmtId="9" applyNumberFormat="1"/><xf numFmtId="164" applyNumberFormat="1"/><xf numFmtId="0" fontId="1" fillId="2" applyFont="1" applyFill="1"><alignment horizontal="center"/></xf></cellXfs></styleSheet>"##,
             );
-            // A1=0.25 用 s=1(百分比)→ 25%;B1=1234.5 用 s=2(#,##0.00)→ 1,234.50;合并 A2:B2
+            // A1=0.25 s=1(百分比);B1=1234.5 s=2(#,##0.00);A2 s=3(粗+红字+黄底+居中);合并 A2:B2
             put(
                 "xl/worksheets/sheet1.xml",
-                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" s="1"><v>0.25</v></c><c r="B1" s="2"><v>1234.5</v></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>合并</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A2:B2"/></mergeCells></worksheet>"#,
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" s="1"><v>0.25</v></c><c r="B1" s="2"><v>1234.5</v></c></row><row r="2"><c r="A2" s="3" t="inlineStr"><is><t>合并</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A2:B2"/></mergeCells></worksheet>"#,
             );
             w.finish().unwrap();
         }
@@ -583,6 +769,17 @@ mod tests {
         assert_eq!(s.sheet.cell(0, 0), "25%", "numFmtId 9 → 百分比");
         assert_eq!(s.sheet.cell(0, 1), "1,234.50", "自定义 #,##0.00");
         assert_eq!(s.merges, vec![(1, 0, 1, 1)], "合并区 A2:B2");
+        // A2(row1,col0)= 粗 + 红字 + 黄底 + 居中
+        let f = s
+            .formats
+            .iter()
+            .find(|&&(r, c, _)| (r, c) == (1, 0))
+            .map(|(_, _, f)| f);
+        let f = f.expect("A2 应有样式");
+        assert!(f.bold);
+        assert_eq!(f.color.as_deref(), Some("FF0000"));
+        assert_eq!(f.fill.as_deref(), Some("FFFF00"));
+        assert_eq!(f.align.as_deref(), Some("center"));
     }
 
     #[test]

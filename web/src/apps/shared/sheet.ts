@@ -78,6 +78,18 @@ export interface UniqueValues {
   truncated: boolean;
 }
 
+/** 单元格视觉样式(xlsx;只读渲染)。 */
+export interface CellStyle {
+  bold?: boolean;
+  italic?: boolean;
+  /** 文字色 RRGGBB。 */
+  color?: string;
+  /** 填充背景 RRGGBB。 */
+  fill?: string;
+  /** 水平对齐。 */
+  align?: "left" | "center" | "right";
+}
+
 /** 只读表格句柄。 */
 export interface SheetHandle {
   /** 行数(过滤后为可视行数)。 */
@@ -123,6 +135,10 @@ export interface SheetHandle {
   ): { row: number; col: number }[];
   /** 枚举某列唯一值(供值集过滤 UI)。 */
   uniqueValues?(col: number, headerRows: number, limit: number): UniqueValues;
+  /** 单元格视觉样式(xlsx);无样式或非 xlsx 返回 null。 */
+  cellStyle?(row: number, col: number): CellStyle | null;
+  /** 合并单元格区域 `[row0, col0, row1, col1]`(0 基,含首尾)。 */
+  merges?: [number, number, number, number][];
   /** 释放底层资源(WASM 线性内存里的表格)。 */
   dispose(): void;
 }

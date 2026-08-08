@@ -578,6 +578,50 @@ impl WasmWorkbook {
             .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
         formulas_to_js(&s.formulas)
     }
+
+    /// 第 `i` 张工作表的非默认单元格样式 `[{row,col,bold,italic,color,fill,align}, ...]`。
+    pub fn styles(&self, i: usize) -> Result<JsValue, JsValue> {
+        let s = self
+            .sheets
+            .get(i)
+            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
+        let arr = js_sys::Array::new();
+        for (row, col, f) in &s.formats {
+            let o = js_sys::Object::new();
+            js_sys::Reflect::set(&o, &"row".into(), &JsValue::from_f64(*row as f64))?;
+            js_sys::Reflect::set(&o, &"col".into(), &JsValue::from_f64(*col as f64))?;
+            js_sys::Reflect::set(&o, &"bold".into(), &JsValue::from_bool(f.bold))?;
+            js_sys::Reflect::set(&o, &"italic".into(), &JsValue::from_bool(f.italic))?;
+            if let Some(c) = &f.color {
+                js_sys::Reflect::set(&o, &"color".into(), &JsValue::from_str(c))?;
+            }
+            if let Some(c) = &f.fill {
+                js_sys::Reflect::set(&o, &"fill".into(), &JsValue::from_str(c))?;
+            }
+            if let Some(a) = &f.align {
+                js_sys::Reflect::set(&o, &"align".into(), &JsValue::from_str(a))?;
+            }
+            arr.push(&o);
+        }
+        Ok(arr.into())
+    }
+
+    /// 第 `i` 张工作表的合并区 `[[r0,c0,r1,c1], ...]`。
+    pub fn merges(&self, i: usize) -> Result<JsValue, JsValue> {
+        let s = self
+            .sheets
+            .get(i)
+            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
+        let arr = js_sys::Array::new();
+        for &(r0, c0, r1, c1) in &s.merges {
+            let m = js_sys::Array::new();
+            for v in [r0, c0, r1, c1] {
+                m.push(&JsValue::from_f64(v as f64));
+            }
+            arr.push(&m);
+        }
+        Ok(arr.into())
+    }
 }
 
 /// 把元信息序列化成 JS 对象(字段名用 camelCase,贴合前端习惯)。
