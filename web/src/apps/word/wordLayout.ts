@@ -29,6 +29,8 @@ export interface TextSegment {
   font: string;
   color: string;
   underline: boolean;
+  /** 删除线(修订删除)。 */
+  strike?: boolean;
 }
 
 /** 绘制项(带绝对 y,供虚拟化裁剪)。 */
@@ -76,6 +78,9 @@ function runFont(run: Run, basePx: number, baseBold: boolean): { font: string; p
 }
 
 function runColor(run: Run): string {
+  // 修订用醒目色:插入(蓝)、删除(红);否则用原色 / 默认
+  if (run.revision === "inserted") return "#0969da";
+  if (run.revision === "deleted") return "#cf222e";
   if (run.color && /^[0-9a-fA-F]{6}$/.test(run.color)) return `#${run.color}`;
   return DEFAULT_COLOR;
 }
@@ -239,6 +244,7 @@ function layoutParagraph(
           font: t.font,
           color: runColor(t.run),
           underline: t.run.underline,
+          strike: t.run.revision === "deleted",
         });
         cx += t.width;
       } else if (t.type === "space") {
@@ -296,22 +302,95 @@ function layoutTable(
   return y + PARA_GAP;
 }
 
-/** 对整篇文档做流式布局。 */
+/** 把一组块从 (x0,y) 起、按 width 流式布局,返回结束 y。 */
+function layoutBlocks(
+  blocks: Block[],
+  x0: number,
+  width: number,
+  y: number,
+  measurer: TextMeasurer,
+  items: DrawItem[],
+): number {
+  for (const block of blocks) {
+    if (block.type === "paragraph") {
+      y = layoutParagraph(block, x0, width, y, measurer, items);
+    } else if (block.type === "table") {
+      y = layoutTable(block, x0, width, y, measurer, items);
+    }
+  }
+  return y;
+}
+
+/** 页眉/页脚分隔线与列间距。 */
+const HF_GAP = 10;
+const COL_GAP = 28;
+
+/** 对整篇文档做流式布局(支持分栏、页眉、页脚)。 */
 export function layoutDoc(model: WordModel, pageWidth: number, measurer: TextMeasurer): Layout {
   const contentWidth = Math.max(40, pageWidth - PAGE_PADDING * 2);
   const x0 = PAGE_PADDING;
   const items: DrawItem[] = [];
   let y = PAGE_PADDING;
 
-  for (const block of model.blocks) {
-    if (block.type === "paragraph") {
-      y = layoutParagraph(block, x0, contentWidth, y, measurer, items);
-    } else if (block.type === "table") {
-      y = layoutTable(block, x0, contentWidth, y, measurer, items);
+  // 页眉:顶部块 + 一条分隔线
+  const header = model.header ?? [];
+  if (header.length > 0) {
+    y = layoutBlocks(header, x0, contentWidth, y, measurer, items);
+    y += HF_GAP;
+    items.push({ kind: "rect", x: x0, y, width: contentWidth, height: 0 });
+    y += HF_GAP;
+  }
+
+  // 正文:分栏(columns>1 时按等宽多列平铺,列满则回到顶继续下一列)
+  const columns = Math.max(1, Math.floor(model.columns ?? 1));
+  if (columns <= 1) {
+    y = layoutBlocks(model.blocks, x0, contentWidth, y, measurer, items);
+  } else {
+    const colWidth = (contentWidth - COL_GAP * (columns - 1)) / columns;
+    // 先按单列量出每块高度,用「贪心装箱」把块分配到各列,尽量等高
+    const bodyTop = y;
+    // 估算总高:先在临时缓冲里单列布局,拿到每块高度
+    const heights = blockHeights(model.blocks, colWidth, measurer);
+    const total = heights.reduce((a, b) => a + b, 0);
+    const target = total / columns;
+    let col = 0;
+    let colY = bodyTop;
+    let acc = 0;
+    let maxBottom = bodyTop;
+    for (let i = 0; i < model.blocks.length; i += 1) {
+      // 换列:累计超过目标且还有后续列
+      if (acc > 0 && acc + heights[i] / 2 > target && col < columns - 1) {
+        col += 1;
+        colY = bodyTop;
+        acc = 0;
+      }
+      const cx = x0 + col * (colWidth + COL_GAP);
+      colY = layoutBlocks([model.blocks[i]], cx, colWidth, colY, measurer, items);
+      acc += heights[i];
+      maxBottom = Math.max(maxBottom, colY);
     }
+    y = maxBottom;
+  }
+
+  // 页脚:一条分隔线 + 底部块
+  const footer = model.footer ?? [];
+  if (footer.length > 0) {
+    y += HF_GAP;
+    items.push({ kind: "rect", x: x0, y, width: contentWidth, height: 0 });
+    y += HF_GAP;
+    y = layoutBlocks(footer, x0, contentWidth, y, measurer, items);
   }
 
   return { width: pageWidth, height: y + PAGE_PADDING, items };
+}
+
+/** 单列布局量取每个块的高度(用于分栏装箱),不产出绘制项。 */
+function blockHeights(blocks: Block[], width: number, measurer: TextMeasurer): number[] {
+  return blocks.map((b) => {
+    const tmp: DrawItem[] = [];
+    const end = layoutBlocks([b], 0, width, 0, measurer, tmp);
+    return end;
+  });
 }
 
 /** 收集布局里用到的图片 id(用于预加载)。 */
@@ -327,5 +406,7 @@ export function imageIdsIn(model: WordModel): string[] {
     }
   };
   walk(model.blocks);
+  walk(model.header ?? []);
+  walk(model.footer ?? []);
   return [...ids];
 }

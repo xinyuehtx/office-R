@@ -10,30 +10,222 @@
 //! - 货币 / 文字前后缀(`$`、`"元"` 等,原样输出);
 //! - 日期时间 `y m d h s`(基于 Excel 序列数,复刻 1900 闰年 bug);
 //! - 科学计数 `E+`;
-//! - 分节:`正;负;零;文本`(用 `;` 分隔,按值符号选节)。
+//! - 分节:`正;负;零;文本`(用 `;` 分隔,按值符号选节);
+//! - **颜色码** `[Red]`/`[Blue]`/`[ColorN]`(经 [`format_with`] 返回);
+//! - **条件段** `[>=100]`/`[<0]`(按条件选节);
+//! - **分数** `# ?/?`、`?/8`(整数 + 最佳分数逼近或固定分母)。
 //!
-//! **非目标**(本期):颜色码 `[Red]`、条件 `[>=100]`、千分位缩放尾随逗号、分数 `?/?`、
-//! 填充 `*`、区域设置 `[$-409]`。遇到不认识的记号按「原样/尽力」处理,绝不 panic。
+//! **非目标**(本期):千分位缩放尾随逗号、填充 `*`、区域设置具体本地化。
+//! 遇到不认识的记号按「原样/尽力」处理,绝不 panic。
+
+/// 格式化结果:显示文本 + 可选颜色(来自 `[Red]` 等颜色码)。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Formatted {
+    /// 显示文本。
+    pub text: String,
+    /// 颜色(CSS 颜色名,如 `"red"`);无颜色码时为 `None`。
+    pub color: Option<String>,
+}
 
 /// 把 `value` 按 `code`(格式码)渲染成显示文本。`General` 或空码走通用格式。
 pub fn format_number(value: f64, code: &str) -> String {
+    format_with(value, code).text
+}
+
+/// 与 [`format_number`] 相同,但额外返回颜色码([`[Red]`] 等)。
+pub fn format_with(value: f64, code: &str) -> Formatted {
     let code = code.trim();
     if code.is_empty() || code.eq_ignore_ascii_case("general") {
-        return general(value);
+        return Formatted {
+            text: general(value),
+            color: None,
+        };
     }
 
-    // 分节:正;负;零[;文本]。按值选节;负值节存在时用其绝对值渲染。
-    let sections = split_sections(code);
-    let (section, use_abs) = pick_section(&sections, value);
+    // 解析各节的「条件 / 颜色 / 主体」
+    let raw_sections = split_sections(code);
+    let parsed: Vec<Section> = raw_sections.iter().map(|s| parse_section(s)).collect();
+    let has_condition = parsed.iter().any(|s| s.cond.is_some());
+
+    let (section, use_abs) = if has_condition {
+        // 条件模式:按顺序选第一个满足条件的节;无条件节作为兜底(不取绝对值)
+        select_by_condition(&parsed, value)
+    } else {
+        // 传统:正;负;零[;文本],负值节取绝对值
+        pick_section_parsed(&parsed, value)
+    };
+
     let v = if use_abs { value.abs() } else { value };
+    let body = &section.body;
+    let color = section.color.clone();
 
-    if section.eq_ignore_ascii_case("general") {
-        return general(v);
+    let text = if body.eq_ignore_ascii_case("general") {
+        general(v)
+    } else if is_date_code(body) {
+        format_datetime(v, body)
+    } else if is_fraction_code(body) {
+        format_fraction(v, body)
+    } else {
+        format_numeric(v, body)
+    };
+    Formatted { text, color }
+}
+
+/// 比较运算(条件段用)。
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CmpOp {
+    Ge,
+    Le,
+    Ne,
+    Gt,
+    Lt,
+    Eq,
+}
+
+/// 一个格式节:可选条件、可选颜色、格式主体(已去掉方括号记号)。
+#[derive(Debug, Clone, Default)]
+struct Section {
+    cond: Option<(CmpOp, f64)>,
+    color: Option<String>,
+    body: String,
+}
+
+/// 解析一个节:提取前导 `[...]`(颜色 / 条件 / 货币字面量),其余为主体。
+fn parse_section(section: &str) -> Section {
+    let mut out = Section::default();
+    let chars: Vec<char> = section.chars().collect();
+    let mut i = 0;
+    let mut body = String::new();
+    while i < chars.len() {
+        if chars[i] == '[' {
+            // 取到匹配的 ']'
+            if let Some(close) = chars[i + 1..].iter().position(|&c| c == ']') {
+                let content: String = chars[i + 1..i + 1 + close].iter().collect();
+                apply_bracket(&content, &mut out, &mut body);
+                i += close + 2;
+                continue;
+            }
+        }
+        body.push(chars[i]);
+        i += 1;
     }
-    if is_date_code(section) {
-        return format_datetime(v, section);
+    out.body = body;
+    out
+}
+
+/// 处理一个方括号记号:颜色 / 条件 / 货币字面量(`[$￥-...]`)/ 其它忽略。
+fn apply_bracket(content: &str, out: &mut Section, body: &mut String) {
+    let lower = content.to_ascii_lowercase();
+    // 条件:[>=100] [<0] [=5] ...
+    if let Some((op, rest)) = split_cmp(content) {
+        if let Ok(n) = rest.trim().parse::<f64>() {
+            out.cond = Some((op, n));
+            return;
+        }
     }
-    format_numeric(v, section)
+    // 颜色名
+    if let Some(c) = color_name(&lower) {
+        out.color = Some(c);
+        return;
+    }
+    // 货币/区域:[$￥-804] → 取 $ 与 - 之间的字面量并入主体
+    if let Some(rest) = content.strip_prefix('$') {
+        let sym = rest.split('-').next().unwrap_or("");
+        body.push_str(sym);
+    }
+    // 其它([h]/[mm] 计时、[$-409] 纯区域等)忽略
+}
+
+fn split_cmp(s: &str) -> Option<(CmpOp, &str)> {
+    if let Some(r) = s.strip_prefix(">=") {
+        Some((CmpOp::Ge, r))
+    } else if let Some(r) = s.strip_prefix("<=") {
+        Some((CmpOp::Le, r))
+    } else if let Some(r) = s.strip_prefix("<>") {
+        Some((CmpOp::Ne, r))
+    } else if let Some(r) = s.strip_prefix('>') {
+        Some((CmpOp::Gt, r))
+    } else if let Some(r) = s.strip_prefix('<') {
+        Some((CmpOp::Lt, r))
+    } else if let Some(r) = s.strip_prefix('=') {
+        Some((CmpOp::Eq, r))
+    } else {
+        None
+    }
+}
+
+fn cmp_matches(op: CmpOp, v: f64, target: f64) -> bool {
+    match op {
+        CmpOp::Ge => v >= target,
+        CmpOp::Le => v <= target,
+        CmpOp::Ne => v != target,
+        CmpOp::Gt => v > target,
+        CmpOp::Lt => v < target,
+        CmpOp::Eq => v == target,
+    }
+}
+
+/// Excel 内置颜色名 → CSS 颜色;`color N`(1..8)映射到调色板前 8 色。
+fn color_name(lower: &str) -> Option<String> {
+    let name = match lower {
+        "black" => "black",
+        "blue" => "blue",
+        "cyan" => "cyan",
+        "green" => "green",
+        "magenta" => "magenta",
+        "red" => "red",
+        "white" => "white",
+        "yellow" => "yellow",
+        _ => {
+            if let Some(n) = lower.strip_prefix("color") {
+                // [ColorN] / [Color N]
+                const PALETTE: [&str; 8] = [
+                    "black", "white", "red", "green", "blue", "yellow", "magenta", "cyan",
+                ];
+                let idx: usize = n.trim().parse().ok()?;
+                return PALETTE.get(idx.saturating_sub(1)).map(|s| s.to_string());
+            }
+            return None;
+        }
+    };
+    Some(name.to_string())
+}
+
+/// 条件模式选节:按顺序选第一个满足条件的节;其后第一个无条件节作兜底。
+fn select_by_condition(sections: &[Section], value: f64) -> (Section, bool) {
+    for s in sections {
+        match s.cond {
+            Some((op, target)) if cmp_matches(op, value, target) => return (s.clone(), false),
+            Some(_) => {}
+            None => return (s.clone(), false), // 无条件 → 兜底
+        }
+    }
+    // 都不满足:用最后一节(或空)
+    (sections.last().cloned().unwrap_or_default(), false)
+}
+
+/// 传统选节(正/负/零),负值节取绝对值。
+fn pick_section_parsed(sections: &[Section], value: f64) -> (Section, bool) {
+    match sections.len() {
+        0 => (Section::default(), false),
+        1 => (sections[0].clone(), false),
+        2 => {
+            if value < 0.0 {
+                (sections[1].clone(), true)
+            } else {
+                (sections[0].clone(), false)
+            }
+        }
+        _ => {
+            if value > 0.0 {
+                (sections[0].clone(), false)
+            } else if value < 0.0 {
+                (sections[1].clone(), true)
+            } else {
+                (sections[2].clone(), false)
+            }
+        }
+    }
 }
 
 /// 通用格式:整数不带小数点,小数去尾 0,吸收浮点噪声(15 位有效数字)。
@@ -67,33 +259,6 @@ fn split_sections(code: &str) -> Vec<&str> {
     code.split(';').collect()
 }
 
-/// 选用哪一节,返回 `(节, 是否取绝对值)`。
-///
-/// Excel 规则:1 节 → 全用;2 节 → 正/零用 [0]、负用 [1](绝对值);
-/// 3+ 节 → 正 [0]、负 [1](绝对值)、零 [2]。
-fn pick_section<'a>(sections: &[&'a str], value: f64) -> (&'a str, bool) {
-    match sections.len() {
-        0 => ("General", false),
-        1 => (sections[0], false),
-        2 => {
-            if value < 0.0 {
-                (sections[1], true)
-            } else {
-                (sections[0], false)
-            }
-        }
-        _ => {
-            if value > 0.0 {
-                (sections[0], false)
-            } else if value < 0.0 {
-                (sections[1], true)
-            } else {
-                (sections[2], false)
-            }
-        }
-    }
-}
-
 /// 是否是日期时间格式码:含未被引号包裹的日期时间字母。
 fn is_date_code(code: &str) -> bool {
     let mut in_quote = false;
@@ -112,6 +277,89 @@ fn is_date_code(code: &str) -> bool {
         i += 1;
     }
     false
+}
+
+// ---------- 分数格式(# ?/?、?/8 等)----------
+
+/// 是否是分数格式:主体里有被占位符包围的 `/`(排除日期里的 `/`)。
+fn is_fraction_code(code: &str) -> bool {
+    if is_date_code(code) {
+        return false;
+    }
+    let bytes = code.as_bytes();
+    if let Some(pos) = code.find('/') {
+        // `/` 两侧应是数字占位符 ? # 0
+        let before = bytes[..pos].iter().rev().find(|b| !b.is_ascii_whitespace());
+        let after = bytes[pos + 1..].iter().find(|b| !b.is_ascii_whitespace());
+        // 分子必是占位符;分母是占位符或固定数字(如 ?/8)
+        let is_ph = |b: &&u8| matches!(**b, b'?' | b'#' | b'0');
+        let is_den = |b: &&u8| matches!(**b, b'?' | b'#' | b'0') || b.is_ascii_digit();
+        before.filter(is_ph).is_some() && after.filter(is_den).is_some()
+    } else {
+        false
+    }
+}
+
+/// 按分数格式渲染:`# ?/?`(带整数)或 `?/?`(纯分数);分母固定(`?/8`)或按位数上限逼近。
+fn format_fraction(value: f64, code: &str) -> String {
+    let neg = value < 0.0;
+    let v = value.abs();
+    let slash = code.find('/').unwrap();
+    let (left, right) = (&code[..slash], &code[slash + 1..]);
+
+    // 整数部分:左侧以空白分隔时,空白前是整数占位、空白后是分子模板
+    let (has_int, num_tmpl) = match left.trim_end().rfind(char::is_whitespace) {
+        Some(sp) => (true, left[sp..].trim()),
+        None => (false, left.trim()),
+    };
+    let _ = num_tmpl;
+
+    let int_part = if has_int { v.floor() } else { 0.0 };
+    let frac = v - int_part;
+
+    // 分母:固定数字则用之,否则按 ? / # 个数定上限(9 / 99 / 999)
+    let den_digits = right.trim();
+    let (best_n, best_d) = if let Ok(fixed) = den_digits.parse::<u32>() {
+        let n = (frac * fixed as f64).round() as u32;
+        (n, fixed.max(1))
+    } else {
+        let max_den = 10u32.pow(
+            den_digits
+                .chars()
+                .filter(|c| matches!(c, '?' | '#' | '0'))
+                .count()
+                .clamp(1, 4) as u32,
+        ) - 1;
+        best_fraction(frac, max_den)
+    };
+
+    let sign = if neg { "-" } else { "" };
+    if has_int {
+        if best_n == 0 {
+            format!("{sign}{}", int_part as i64)
+        } else {
+            format!("{sign}{} {best_n}/{best_d}", int_part as i64)
+        }
+    } else {
+        // 纯分数:整数并入分子
+        let total_n = best_n + (int_part as u32) * best_d;
+        format!("{sign}{total_n}/{best_d}")
+    }
+}
+
+/// 在分母 `1..=max_den` 内找最逼近 `frac`(0..1)的 `n/d`。
+fn best_fraction(frac: f64, max_den: u32) -> (u32, u32) {
+    let mut best = (0u32, 1u32);
+    let mut best_err = frac;
+    for d in 1..=max_den.max(1) {
+        let n = (frac * d as f64).round() as u32;
+        let err = (frac - n as f64 / d as f64).abs();
+        if err < best_err {
+            best_err = err;
+            best = (n, d);
+        }
+    }
+    best
 }
 
 // ---------- 数值格式 ----------
@@ -598,5 +846,52 @@ mod tests {
         let _ = format_number(1.0, "???");
         let _ = format_number(-1.0, ";;;");
         let _ = format_number(f64::NAN, "0.00");
+    }
+
+    #[test]
+    fn color_codes() {
+        // 负值节带 [Red],正值无色
+        let pos = format_with(1234.0, "#,##0;[Red]-#,##0");
+        assert_eq!(pos.text, "1,234");
+        assert_eq!(pos.color, None);
+        let neg = format_with(-1234.0, "#,##0;[Red]-#,##0");
+        assert_eq!(neg.text, "-1,234");
+        assert_eq!(neg.color.as_deref(), Some("red"));
+        // 颜色不影响纯文本 API
+        assert_eq!(format_number(-1234.0, "#,##0;[Red]-#,##0"), "-1,234");
+    }
+
+    #[test]
+    fn condition_sections() {
+        // [>=60]"及格";[<60]"不及格"
+        let code = "[>=60]0\"分\";[<60]\"不及格\"";
+        assert_eq!(format_number(80.0, code), "80分");
+        assert_eq!(format_number(50.0, code), "不及格");
+        // 带颜色的条件段
+        let c2 = "[Green][>=100]0;[Red]0";
+        assert_eq!(format_with(150.0, c2).color.as_deref(), Some("green"));
+        assert_eq!(format_with(50.0, c2).color.as_deref(), Some("red"));
+    }
+
+    #[test]
+    fn fraction_formats() {
+        // 固定分母
+        assert_eq!(format_number(0.5, "?/8"), "4/8");
+        // 带整数 + 最佳分数(? 上限 9)
+        assert_eq!(format_number(2.5, "# ?/?"), "2 1/2");
+        assert_eq!(format_number(2.25, "# ?/?"), "2 1/4");
+        // 整数无小数 → 只显示整数
+        assert_eq!(format_number(3.0, "# ?/?"), "3");
+        // 纯分数(?? 上限 99)
+        assert_eq!(format_number(0.7, "??/??"), "7/10");
+        // 负数
+        assert_eq!(format_number(-1.5, "# ?/?"), "-1 1/2");
+    }
+
+    #[test]
+    fn currency_bracket_literal() {
+        // [$￥-804]#,##0.00 → 货币符号并入前缀
+        let f = format_number(12.0, "[$￥-804]#,##0.00");
+        assert!(f.starts_with('￥'), "实际 {f}");
     }
 }

@@ -76,14 +76,17 @@ export function WordPage() {
           ctx.font = seg.font;
           ctx.fillStyle = seg.color;
           ctx.fillText(seg.text, seg.x, drawY);
-          if (seg.underline) {
+          if (seg.underline || seg.strike) {
             const w = ctx.measureText(seg.text).width;
             ctx.strokeStyle = seg.color;
             ctx.lineWidth = 1;
             ctx.beginPath();
-            const uy = Math.round(drawY + item.height / 3) + 0.5;
-            ctx.moveTo(seg.x, uy);
-            ctx.lineTo(seg.x + w, uy);
+            // 下划线在基线下方,删除线在中线
+            const ly = seg.strike
+              ? Math.round(drawY) + 0.5
+              : Math.round(drawY + item.height / 3) + 0.5;
+            ctx.moveTo(seg.x, ly);
+            ctx.lineTo(seg.x + w, ly);
             ctx.stroke();
           }
         }

@@ -177,3 +177,47 @@ describe("wordLayout · 列表编号与两端对齐", () => {
     }
   });
 });
+
+describe("wordLayout · 页眉页脚 + 分栏 + 修订", () => {
+  it("页眉/页脚块被布局(含分隔线 rect)", () => {
+    const model: WordModel = {
+      blocks: [para([run("正文")])],
+      header: [para([run("页眉")])],
+      footer: [para([run("页脚")])],
+    };
+    const layout = layoutDoc(model, 820, measurer);
+    // CJK 逐字成段,拼接每个 textline 判断包含
+    const lineTexts = layout.items
+      .filter((i) => i.kind === "textline")
+      .map((i) => (i.kind === "textline" ? i.segments.map((s) => s.text).join("") : ""));
+    expect(lineTexts.some((t) => t.includes("页眉"))).toBe(true);
+    expect(lineTexts.some((t) => t.includes("页脚"))).toBe(true);
+    expect(lineTexts.some((t) => t.includes("正文"))).toBe(true);
+    // 页眉页脚各一条分隔线(height=0 的 rect)
+    expect(layout.items.filter((i) => i.kind === "rect" && i.height === 0).length).toBe(2);
+  });
+
+  it("分栏:两列时块分布在不同 x", () => {
+    const blocks = Array.from({ length: 8 }, (_, i) => para([run(`段落${i}`)]));
+    const layout = layoutDoc({ blocks, columns: 2 }, 820, measurer);
+    const xs = new Set(
+      layout.items
+        .filter((i) => i.kind === "textline")
+        .map((i) => (i.kind === "textline" ? Math.round(i.segments[0].x) : 0)),
+    );
+    // 至少出现两个不同的起始 x(两列)
+    expect(xs.size).toBeGreaterThanOrEqual(2);
+  });
+
+  it("修订:插入=蓝色,删除=红色+删除线", () => {
+    const inserted: Run = { ...run("A"), revision: "inserted" };
+    const deleted: Run = { ...run("B"), revision: "deleted" };
+    const layout = layoutDoc({ blocks: [para([inserted, deleted])] }, 820, measurer);
+    const segs = layout.items.flatMap((i) => (i.kind === "textline" ? i.segments : []));
+    const ins = segs.find((s) => s.text === "A");
+    const del = segs.find((s) => s.text === "B");
+    expect(ins?.color).toBe("#0969da");
+    expect(del?.color).toBe("#cf222e");
+    expect(del?.strike).toBe(true);
+  });
+});

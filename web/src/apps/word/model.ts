@@ -5,6 +5,9 @@
 
 export type Align = "left" | "center" | "right" | "justify";
 
+/** 修订标记:无 / 插入 / 删除。 */
+export type Revision = "none" | "inserted" | "deleted";
+
 export interface Run {
   kind: "text";
   text: string;
@@ -15,6 +18,8 @@ export interface Run {
   size_pt: number | null;
   /** RRGGBB(无 #)。 */
   color: string | null;
+  /** 修订标记(缺省 none)。 */
+  revision?: Revision;
 }
 
 export interface ImageRef {
@@ -60,6 +65,12 @@ export type Block = Paragraph | Table;
 
 export interface WordModel {
   blocks: Block[];
+  /** 正文分栏数(默认 1)。 */
+  columns?: number;
+  /** 页眉块。 */
+  header?: Block[];
+  /** 页脚块。 */
+  footer?: Block[];
 }
 
 /** 图片资源:id → object URL(由字节 + mime 构造)。 */

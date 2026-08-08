@@ -39,6 +39,19 @@ pub struct ListItem {
     pub number: Option<u32>,
 }
 
+/// 修订标记:普通 / 插入 / 删除(来自 `w:ins` / `w:del`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Revision {
+    /// 非修订。
+    #[default]
+    None,
+    /// 插入(修订):视图可加下划线/着色。
+    Inserted,
+    /// 删除(修订):视图可加删除线/着色。
+    Deleted,
+}
+
 /// 一段文本 run(同一批格式)。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Run {
@@ -54,6 +67,9 @@ pub struct Run {
     pub size_pt: Option<f64>,
     /// 文字颜色(`RRGGBB` 十六进制,不含 `#`)。
     pub color: Option<String>,
+    /// 修订标记(插入/删除/无)。
+    #[serde(default)]
+    pub revision: Revision,
 }
 
 /// 内联图片引用(字节在 [`ParsedDoc::images`] 里按 `id` 取)。
@@ -122,6 +138,15 @@ pub enum Block {
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct WordDoc {
     pub blocks: Vec<Block>,
+    /// 正文分栏数(来自 sectPr;默认 1)。
+    #[serde(default)]
+    pub columns: u32,
+    /// 页眉段落(来自 header part);无则空。
+    #[serde(default)]
+    pub header: Vec<Block>,
+    /// 页脚段落(来自 footer part);无则空。
+    #[serde(default)]
+    pub footer: Vec<Block>,
 }
 
 /// 一张图片的字节(单独于模型,便于按需转移到 JS)。
@@ -169,10 +194,54 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedDoc, String> {
         .iter()
         .filter_map(|c| convert_child(c, &mut ctx))
         .collect();
+
+    // 分栏 / 页眉 / 页脚(来自 sectPr)
+    let sect = &docx.document.section_property;
+    let columns = (sect.columns as u32).max(1);
+    let header = sect
+        .header
+        .as_ref()
+        .map(|(_, h)| convert_header_children(&h.children, &mut ctx))
+        .unwrap_or_default();
+    let footer = sect
+        .footer
+        .as_ref()
+        .map(|(_, f)| convert_footer_children(&f.children, &mut ctx))
+        .unwrap_or_default();
+
     Ok(ParsedDoc {
-        doc: WordDoc { blocks },
+        doc: WordDoc {
+            blocks,
+            columns,
+            header,
+            footer,
+        },
         images,
     })
+}
+
+/// 把页眉子元素转成块(段落 / 表格)。
+fn convert_header_children(children: &[docx_rs::HeaderChild], ctx: &mut Ctx) -> Vec<Block> {
+    children
+        .iter()
+        .filter_map(|c| match c {
+            docx_rs::HeaderChild::Paragraph(p) => Some(Block::Paragraph(convert_paragraph(p, ctx))),
+            docx_rs::HeaderChild::Table(t) => Some(Block::Table(convert_table(t, ctx))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 把页脚子元素转成块(段落 / 表格)。
+fn convert_footer_children(children: &[docx_rs::FooterChild], ctx: &mut Ctx) -> Vec<Block> {
+    children
+        .iter()
+        .filter_map(|c| match c {
+            docx_rs::FooterChild::Paragraph(p) => Some(Block::Paragraph(convert_paragraph(p, ctx))),
+            docx_rs::FooterChild::Table(t) => Some(Block::Table(convert_table(t, ctx))),
+            _ => None,
+        })
+        .collect()
 }
 
 /// 从 `numbering.xml`(docx-rs 的 `numberings`)构建 numId → level → 是否有序。
@@ -294,8 +363,24 @@ fn convert_paragraph(p: &DxParagraph, ctx: &mut Ctx) -> Paragraph {
 
     let mut inlines = Vec::new();
     for child in &p.children {
-        if let ParagraphChild::Run(run) = child {
-            append_run(run, &mut inlines);
+        match child {
+            ParagraphChild::Run(run) => append_run(run, Revision::None, &mut inlines),
+            // 修订:插入 / 删除 里的 run 打上标记
+            ParagraphChild::Insert(ins) => {
+                for ic in &ins.children {
+                    if let docx_rs::InsertChild::Run(run) = ic {
+                        append_run(run, Revision::Inserted, &mut inlines);
+                    }
+                }
+            }
+            ParagraphChild::Delete(del) => {
+                for dc in &del.children {
+                    if let docx_rs::DeleteChild::Run(run) = dc {
+                        append_run(run, Revision::Deleted, &mut inlines);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -307,36 +392,45 @@ fn convert_paragraph(p: &DxParagraph, ctx: &mut Ctx) -> Paragraph {
     }
 }
 
-fn append_run(run: &docx_rs::Run, out: &mut Vec<Inline>) {
+fn append_run(run: &docx_rs::Run, revision: Revision, out: &mut Vec<Inline>) {
     let rp = &run.run_property;
     let bold = rp.bold.is_some();
     let italic = rp.italic.is_some();
     let underline = rp.underline.is_some();
     let (size_pt, color) = run_size_color(rp);
+    let mk = |text: String| {
+        Inline::Text(Run {
+            text,
+            bold,
+            italic,
+            underline,
+            size_pt,
+            color: color.clone(),
+            revision,
+        })
+    };
 
     for child in &run.children {
         match child {
-            RunChild::Text(t) => {
+            RunChild::Text(t) => out.push(mk(t.text.clone())),
+            RunChild::DeleteText(t) => {
+                // 删除修订里的文本(w:delText);DeleteText.text 私有,经 serde 取
+                let text = serde_json::to_value(t)
+                    .ok()
+                    .and_then(|v| v.get("text").and_then(|x| x.as_str()).map(String::from))
+                    .unwrap_or_default();
                 out.push(Inline::Text(Run {
-                    text: t.text.clone(),
+                    text,
                     bold,
                     italic,
                     underline,
                     size_pt,
                     color: color.clone(),
+                    revision: Revision::Deleted,
                 }));
             }
             RunChild::Break(_) => out.push(Inline::Break),
-            RunChild::Tab(_) => {
-                out.push(Inline::Text(Run {
-                    text: "\t".to_string(),
-                    bold,
-                    italic,
-                    underline,
-                    size_pt,
-                    color: color.clone(),
-                }));
-            }
+            RunChild::Tab(_) => out.push(mk("\t".to_string())),
             RunChild::Drawing(d) => {
                 if let Some(img) = drawing_image(d) {
                     out.push(Inline::Image(img));
@@ -454,11 +548,11 @@ fn convert_table(t: &docx_rs::Table, ctx: &mut Ctx) -> Table {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, Align, Block, Inline, Paragraph};
+    use super::{parse, Align, Block, Inline, Paragraph, Revision};
     use docx_rs::{
-        AbstractNumbering, AlignmentType, Docx, IndentLevel, Level, LevelJc, LevelText,
-        NumberFormat, Numbering, NumberingId, Paragraph as DxPara, Run as DxRun, Start,
-        Table as DxTable, TableCell as DxCell, TableRow as DxRow,
+        AbstractNumbering, AlignmentType, Delete, Docx, Footer, Header, IndentLevel, Insert, Level,
+        LevelJc, LevelText, NumberFormat, Numbering, NumberingId, Paragraph as DxPara,
+        Run as DxRun, Start, Table as DxTable, TableCell as DxCell, TableRow as DxRow,
     };
 
     /// 用 docx-rs 的写路径构造一份 docx 字节作为测试夹具。
@@ -609,6 +703,68 @@ mod tests {
         assert!(parse(b"not a docx").is_err());
     }
 
+    #[test]
+    fn parses_revisions_ins_del() {
+        // 一段:普通 run + 插入 run + 删除 run
+        let mut buf = Vec::new();
+        Docx::new()
+            .add_paragraph(
+                DxPara::new()
+                    .add_run(DxRun::new().add_text("原文"))
+                    .add_insert(Insert::new(DxRun::new().add_text("新增")))
+                    .add_delete(Delete::new().add_run(DxRun::new().add_delete_text("删掉"))),
+            )
+            .build()
+            .pack(&mut std::io::Cursor::new(&mut buf))
+            .expect("打包");
+        let parsed = parse(&buf).expect("解析");
+        let Block::Paragraph(p) = &parsed.doc.blocks[0] else {
+            panic!("应为段落");
+        };
+        let revs: Vec<(String, Revision)> = p
+            .inlines
+            .iter()
+            .filter_map(|i| match i {
+                Inline::Text(r) => Some((r.text.clone(), r.revision)),
+                _ => None,
+            })
+            .collect();
+        assert!(revs.contains(&("原文".into(), Revision::None)));
+        assert!(revs.contains(&("新增".into(), Revision::Inserted)));
+        assert!(revs.contains(&("删掉".into(), Revision::Deleted)));
+    }
+
+    #[test]
+    fn parses_header_and_footer() {
+        let mut buf = Vec::new();
+        Docx::new()
+            .header(
+                Header::new().add_paragraph(DxPara::new().add_run(DxRun::new().add_text("页眉X"))),
+            )
+            .footer(
+                Footer::new().add_paragraph(DxPara::new().add_run(DxRun::new().add_text("页脚Y"))),
+            )
+            .add_paragraph(DxPara::new().add_run(DxRun::new().add_text("正文")))
+            .build()
+            .pack(&mut std::io::Cursor::new(&mut buf))
+            .expect("打包");
+        let parsed = parse(&buf).expect("解析");
+        assert_eq!(header_text(&parsed.doc.header), "页眉X");
+        assert_eq!(header_text(&parsed.doc.footer), "页脚Y");
+        // 未设分栏时默认 1
+        assert_eq!(parsed.doc.columns, 1);
+    }
+
+    fn header_text(blocks: &[Block]) -> String {
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Paragraph(p) => Some(text_of(p)),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn text_of(p: &Paragraph) -> String {
         p.inlines
             .iter()
@@ -658,6 +814,8 @@ mod fixture_gen {
 
         let mut buf = Vec::new();
         Docx::new()
+            .header(Header::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text("office-R 文档页眉"))))
+            .footer(Footer::new().add_paragraph(Paragraph::new().add_run(Run::new().add_text("第 1 页 · 页脚"))))
             .add_paragraph(Paragraph::new().style("Heading1").add_run(Run::new().add_text("office-R Word 渲染演示")))
             .add_paragraph(
                 Paragraph::new()
@@ -682,6 +840,14 @@ mod fixture_gen {
             )
             .add_paragraph(Paragraph::new().style("Heading2").add_run(Run::new().add_text("三、表格")))
             .add_table(table)
+            .add_paragraph(Paragraph::new().style("Heading2").add_run(Run::new().add_text("四、修订")))
+            .add_paragraph(
+                Paragraph::new()
+                    .add_run(Run::new().add_text("保留文字 "))
+                    .add_insert(Insert::new(Run::new().add_text("这是插入")))
+                    .add_run(Run::new().add_text(" "))
+                    .add_delete(Delete::new().add_run(Run::new().add_delete_text("这是删除"))),
+            )
             .build()
             .pack(&mut Cursor::new(&mut buf))
             .expect("打包");
