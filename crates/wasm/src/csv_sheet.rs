@@ -313,6 +313,62 @@ impl WasmSheet {
         self.rows()
     }
 
+    /// 全表查找:返回所有命中单元格的**可视坐标** `[{row, col}, ...]`(受过滤/排序影响,
+    /// 搜索的是当前所见内容)。按可视行优先、列其次的顺序;最多 `limit` 个。
+    ///
+    /// `case_sensitive` 区分大小写;`whole_cell` 为真时整格精确相等,否则子串包含。
+    pub fn find(
+        &self,
+        needle: &str,
+        case_sensitive: bool,
+        whole_cell: bool,
+        limit: u32,
+    ) -> Result<JsValue, JsValue> {
+        let array = js_sys::Array::new();
+        if needle.is_empty() {
+            return Ok(array.into());
+        }
+        let cols = self.sheet.cols();
+        let vis_rows = self.rows() as usize;
+        let needle_cmp = if case_sensitive {
+            needle.to_string()
+        } else {
+            needle.to_lowercase()
+        };
+        let mut count = 0u32;
+        'outer: for v in 0..vis_rows {
+            // 可视行 → 底层行
+            let underlying = match &self.row_map {
+                Some(map) => map[v] as usize,
+                None => v,
+            };
+            for c in 0..cols {
+                let cell = self.sheet.cell(underlying, c);
+                let hay = if case_sensitive {
+                    cell.to_string()
+                } else {
+                    cell.to_lowercase()
+                };
+                let hit = if whole_cell {
+                    hay == needle_cmp
+                } else {
+                    hay.contains(&needle_cmp)
+                };
+                if hit {
+                    let obj = js_sys::Object::new();
+                    js_sys::Reflect::set(&obj, &"row".into(), &JsValue::from_f64(v as f64))?;
+                    js_sys::Reflect::set(&obj, &"col".into(), &JsValue::from_f64(c as f64))?;
+                    array.push(&obj);
+                    count += 1;
+                    if count >= limit {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        Ok(array.into())
+    }
+
     /// 枚举某列的唯一值(供值集过滤 UI),跳过顶部 `header_rows` 行,最多 `limit` 个。
     /// 返回 `{ values: string[], truncated: boolean }`。
     #[wasm_bindgen(js_name = uniqueValues)]

@@ -195,6 +195,12 @@ function buildSheetHandle(inner: WasmSheet, formulas: CellFormula[]): SheetHandl
     sort(col: number, dir: "asc" | "desc" | "none", headerRows: number): number {
       return inner.sort(col, dir, headerRows);
     },
+    find(needle: string, caseSensitive: boolean, wholeCell: boolean, limit: number) {
+      return inner.find(needle, caseSensitive, wholeCell, limit) as {
+        row: number;
+        col: number;
+      }[];
+    },
     uniqueValues(col: number, headerRows: number, limit: number): UniqueValues {
       return inner.uniqueValues(col, headerRows, limit) as UniqueValues;
     },

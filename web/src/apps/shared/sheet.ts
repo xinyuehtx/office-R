@@ -111,6 +111,16 @@ export interface SheetHandle {
    * 与过滤复合(排序作用在过滤结果之上);顶部 `headerRows` 行固定置顶。
    */
   sort?(col: number, dir: "asc" | "desc" | "none", headerRows: number): number;
+  /**
+   * 全表查找,返回命中单元格的**可视坐标**(受过滤/排序影响)。
+   * `wholeCell` 为整格精确匹配,否则子串;`limit` 上限。
+   */
+  find?(
+    needle: string,
+    caseSensitive: boolean,
+    wholeCell: boolean,
+    limit: number,
+  ): { row: number; col: number }[];
   /** 枚举某列唯一值(供值集过滤 UI)。 */
   uniqueValues?(col: number, headerRows: number, limit: number): UniqueValues;
   /** 释放底层资源(WASM 线性内存里的表格)。 */

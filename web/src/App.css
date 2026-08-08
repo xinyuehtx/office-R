@@ -391,6 +391,44 @@
   color: #8c959f;
 }
 
+/* 查找栏 */
+.sheet__find-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-bottom: 1px solid #d0d7de;
+  background: #fff8c5;
+  font-size: 12px;
+}
+
+.sheet__find-input {
+  padding: 3px 8px;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  font-size: 13px;
+  min-width: 180px;
+}
+
+.sheet__find-count {
+  color: #57606a;
+  min-width: 56px;
+}
+
+.sheet__find-bar button {
+  font-size: 12px;
+  padding: 2px 8px;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.sheet__find-bar button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .sheet__freeze-state {
   color: #0969da;
 }

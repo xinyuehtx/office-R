@@ -56,6 +56,12 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
   const [sort, setSort] = useState<{ col: number; dir: "asc" | "desc" } | null>(null);
   /** 复制反馈(短暂显示「已复制 R×C」)。 */
   const [copied, setCopied] = useState<string | null>(null);
+  /** 查找:是否打开、查询串、命中列表、当前命中下标。 */
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findMatches, setFindMatches] = useState<{ row: number; col: number }[]>([]);
+  const [findIdx, setFindIdx] = useState(0);
+  const canFind = typeof sheet.find === "function";
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
   const anchorRef = useRef(anchor);
@@ -140,6 +146,9 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
     setAnchor({ row: 0, col: 0 });
     setFilters(new Map());
     setSort(null);
+    setFindOpen(false);
+    setFindQuery("");
+    setFindMatches([]);
     renderer.setSelectionRange(null);
     setZoom(renderer.getZoom());
     renderer.requestFrame();
@@ -259,6 +268,39 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
       renderer?.requestFrame();
     },
     [canSort, sheet],
+  );
+
+  /** 跳到第 i 个命中:选中该格并滚入视野。 */
+  const gotoMatch = useCallback(
+    (matches: { row: number; col: number }[], i: number) => {
+      if (matches.length === 0) return;
+      const idx = ((i % matches.length) + matches.length) % matches.length;
+      setFindIdx(idx);
+      const m = matches[idx];
+      const renderer = rendererRef.current;
+      setSelection(m);
+      setAnchor(m);
+      renderer?.setSelection(m);
+      renderer?.setSelectionRange(m ? { row0: m.row, row1: m.row, col0: m.col, col1: m.col } : null);
+      renderer?.revealSelection();
+    },
+    [],
+  );
+
+  /** 运行查找并跳到第一个命中。 */
+  const runFind = useCallback(
+    (query: string) => {
+      setFindQuery(query);
+      if (!canFind || query === "") {
+        setFindMatches([]);
+        setFindIdx(0);
+        return;
+      }
+      const matches = sheet.find?.(query, false, false, 5000) ?? [];
+      setFindMatches(matches);
+      gotoMatch(matches, 0);
+    },
+    [canFind, sheet, gotoMatch],
   );
 
   const applyZoom = useCallback((next: number, anchor?: { x: number; y: number }) => {
@@ -434,6 +476,11 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
           event.preventDefault();
           void copySelection();
           return;
+        case "f":
+        case "F":
+          event.preventDefault();
+          setFindOpen(true);
+          return;
         case "=":
         case "+":
           event.preventDefault();
@@ -516,6 +563,57 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
 
   return (
     <div className="sheet">
+      {canFind && findOpen && (
+        <div className="sheet__find-bar" data-testid="find-bar">
+          <input
+            type="text"
+            className="sheet__find-input"
+            data-testid="find-input"
+            placeholder="查找…"
+            autoFocus
+            value={findQuery}
+            onChange={(e) => runFind(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                gotoMatch(findMatches, findIdx + (e.shiftKey ? -1 : 1));
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setFindOpen(false);
+              }
+            }}
+          />
+          <span className="sheet__find-count" data-testid="find-count">
+            {findMatches.length > 0 ? `${findIdx + 1}/${findMatches.length}` : "无匹配"}
+          </span>
+          <button
+            type="button"
+            data-testid="find-prev"
+            disabled={findMatches.length === 0}
+            onClick={() => gotoMatch(findMatches, findIdx - 1)}
+            title="上一个"
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            data-testid="find-next"
+            disabled={findMatches.length === 0}
+            onClick={() => gotoMatch(findMatches, findIdx + 1)}
+            title="下一个"
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            className="sheet__filter-link"
+            data-testid="find-close"
+            onClick={() => setFindOpen(false)}
+          >
+            关闭
+          </button>
+        </div>
+      )}
       {canFilter && (
         <FilterBar
           sheet={sheet}

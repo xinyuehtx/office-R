@@ -86,4 +86,19 @@ test.describe("Excel 只读:公式 / 过滤 / 冻结", () => {
     await page.getByTestId("copy-selection").click();
     await expect(page.getByTestId("copied-toast")).toBeVisible();
   });
+
+  test("查找:Ctrl+F 定位命中并计数", async ({ page }) => {
+    await gotoTab(page, "表格");
+    await upload(page, "sample.csv");
+    const canvas = page.getByTestId("sheet-canvas");
+    await expect(canvas).toBeVisible();
+    await canvas.click();
+    await page.keyboard.press("Control+f");
+    await expect(page.getByTestId("find-bar")).toBeVisible();
+    await page.getByTestId("find-input").fill("香蕉");
+    await expect(page.getByTestId("find-count")).toContainText("1/1");
+    // 关闭
+    await page.getByTestId("find-close").click();
+    await expect(page.getByTestId("find-bar")).toHaveCount(0);
+  });
 });
