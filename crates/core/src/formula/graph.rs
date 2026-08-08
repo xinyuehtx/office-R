@@ -57,6 +57,9 @@ fn walk(node: &Node, out: &mut Precedents) {
                 walk(a, out);
             }
         }
+        // 具名区域的前驱在名称解析后才知道;跨表引用指向另一张常量表 —— 两者
+        // 都不在此登记本表前驱(按需求值仍正确,只是不参与本表增量脏区传播)。
+        Node::Name(_) | Node::CrossRef { .. } | Node::CrossRange { .. } => {}
         Node::Number(_) | Node::Text(_) | Node::Bool(_) | Node::Error(_) => {}
     }
 }

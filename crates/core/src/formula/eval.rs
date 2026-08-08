@@ -100,6 +100,11 @@ pub struct Workbook {
     values: HashMap<Cell, Value>,
     /// 迭代计算配置。
     iterative: Iterative,
+    /// 具名区域:名称(大写)→ 目标范围(限当前工作表)。
+    names: HashMap<String, RangeRef>,
+    /// 其它工作表的**常量值**:表名 → (单元格 → 值)。供跨表引用 `Sheet!A1` 读取。
+    /// 这些是只读数据表(不参与本表的增量依赖),xlsx 的多表数据可据此互相引用。
+    sheets: HashMap<String, HashMap<Cell, Value>>,
 }
 
 /// 一次增量重算的报告。
@@ -120,6 +125,22 @@ impl Workbook {
     /// 设置「当前时间」序列数(见字段说明)。
     pub fn set_now(&mut self, serial: f64) {
         self.now_serial = serial;
+    }
+
+    /// 定义一个具名区域:`name`(不区分大小写)→ 目标范围(当前工作表内)。
+    /// 单个单元格可用 [`RangeRef::single`] 传入。
+    pub fn define_name(&mut self, name: &str, range: RangeRef) {
+        self.names.insert(name.to_ascii_uppercase(), range);
+    }
+
+    /// 写入**其它工作表**的一个常量单元格(供跨表引用 `Sheet!A1`)。
+    /// 副表只存常量值(数字/文本/布尔);`=` 开头也按字面量文本处理(副表不求值)。
+    pub fn set_sheet_input(&mut self, sheet: &str, row: u32, col: u32, input: &str) {
+        let value = interpret_literal(input);
+        self.sheets
+            .entry(sheet.to_string())
+            .or_default()
+            .insert((row, col), value);
     }
 
     /// 已登记内容的行数上界(最大行号 + 1)。
@@ -636,6 +657,39 @@ impl<'a> Evaluator<'a> {
             Node::Error(e) => Value::Error(*e),
             Node::Ref(cell) => self.cell_value(cell.row, cell.col),
             Node::Range(range) => Value::Array(self.range_to_array(*range)),
+            // 具名区域:解析为其目标范围(单格→标量,多格→数组);未定义 → #NAME?
+            Node::Name(name) => match self.wb.names.get(name).copied() {
+                Some(range) => {
+                    if range.rows() == 1 && range.cols() == 1 {
+                        self.cell_value(range.row0, range.col0)
+                    } else {
+                        Value::Array(self.range_to_array(range))
+                    }
+                }
+                None => Value::Error(ExcelError::Name),
+            },
+            // 跨表单元格:读另一张(常量)表;缺失表 → #REF!,缺失格 → 空
+            Node::CrossRef { sheet, cell } => match self.wb.sheets.get(sheet) {
+                Some(grid) => grid
+                    .get(&(cell.row, cell.col))
+                    .cloned()
+                    .unwrap_or(Value::Blank),
+                None => Value::Error(ExcelError::Ref),
+            },
+            Node::CrossRange { sheet, range } => match self.wb.sheets.get(sheet) {
+                Some(grid) => {
+                    let rows = range.rows() as usize;
+                    let cols = range.cols() as usize;
+                    let mut data = Vec::with_capacity(rows * cols);
+                    for r in range.row0..=range.row1 {
+                        for c in range.col0..=range.col1 {
+                            data.push(grid.get(&(r, c)).cloned().unwrap_or(Value::Blank));
+                        }
+                    }
+                    Value::Array(Array::new(rows, cols, data))
+                }
+                None => Value::Error(ExcelError::Ref),
+            },
             Node::Unary(op, operand) => self.eval_unary(*op, operand),
             Node::Binary(op, l, r) => self.eval_binary(*op, l, r),
             Node::Func(name, args) => match functions::lookup(name) {
@@ -729,6 +783,19 @@ impl<'a> Evaluator<'a> {
                 }
                 out
             }
+            // 具名区域:展开为其目标范围的逐格值
+            Node::Name(name) => match self.wb.names.get(name).copied() {
+                Some(range) => {
+                    let mut out = Vec::with_capacity((range.rows() * range.cols()) as usize);
+                    for r in range.row0..=range.row1 {
+                        for c in range.col0..=range.col1 {
+                            out.push(self.cell_value(r, c));
+                        }
+                    }
+                    out
+                }
+                None => vec![Value::Error(ExcelError::Name)],
+            },
             other => match self.eval(other) {
                 Value::Array(a) => a.data,
                 v => vec![v],
@@ -1120,5 +1187,58 @@ mod tests {
         wb.recalculate();
         let a1 = wb.computed_value(0, 0).to_number().unwrap();
         assert!((a1 - 6.0).abs() < 1e-6, "Gauss–Seidel 应收敛到 6,实际 {a1}");
+    }
+
+    #[test]
+    fn cross_sheet_reference_reads_other_sheet() {
+        let mut wb = Workbook::new();
+        // 副表 Data:A1=10, A2=20
+        wb.set_sheet_input("Data", 0, 0, "10");
+        wb.set_sheet_input("Data", 1, 0, "20");
+        // 本表引用跨表单元格与范围
+        wb.set_input(0, 0, "=Data!A1+Data!A2");
+        wb.set_input(1, 0, "=SUM(Data!A1:A2)");
+        assert_eq!(wb.eval_cell(0, 0), Value::Number(30.0));
+        assert_eq!(wb.eval_cell(1, 0), Value::Number(30.0));
+    }
+
+    #[test]
+    fn cross_sheet_quoted_name() {
+        let mut wb = Workbook::new();
+        wb.set_sheet_input("My Sheet", 0, 0, "7");
+        wb.set_input(0, 0, "='My Sheet'!A1*2");
+        assert_eq!(wb.eval_cell(0, 0), Value::Number(14.0));
+    }
+
+    #[test]
+    fn cross_sheet_missing_sheet_is_ref_error() {
+        let mut wb = Workbook::new();
+        wb.set_input(0, 0, "=Missing!A1");
+        assert_eq!(wb.eval_cell(0, 0), Value::Error(ExcelError::Ref));
+    }
+
+    #[test]
+    fn named_range_scalar_and_aggregate() {
+        let mut wb = Workbook::new();
+        wb.set_input(0, 0, "3"); // A1
+        wb.set_input(1, 0, "4"); // A2
+        wb.set_input(2, 0, "5"); // A3
+                                 // 定义名:Rate=A1(单格),Data=A1:A3(区域)
+        wb.define_name("Rate", RangeRef::single(CellRef::new(0, 0)));
+        wb.define_name(
+            "Data",
+            RangeRef::from_corners(CellRef::new(0, 0), CellRef::new(2, 0)),
+        );
+        wb.set_input(0, 1, "=Rate*10"); // 单格名 → 标量
+        wb.set_input(1, 1, "=SUM(Data)"); // 区域名 → 聚合
+        assert_eq!(wb.eval_cell(0, 1), Value::Number(30.0));
+        assert_eq!(wb.eval_cell(1, 1), Value::Number(12.0));
+    }
+
+    #[test]
+    fn undefined_name_is_name_error() {
+        let mut wb = Workbook::new();
+        wb.set_input(0, 0, "=Nope+1");
+        assert_eq!(wb.eval_cell(0, 0), Value::Error(ExcelError::Name));
     }
 }

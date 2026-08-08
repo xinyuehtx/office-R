@@ -62,6 +62,12 @@ pub enum Node {
     Ref(CellRef),
     /// 范围引用。
     Range(RangeRef),
+    /// 跨工作表单元格引用(`Sheet1!A1`)。
+    CrossRef { sheet: String, cell: CellRef },
+    /// 跨工作表范围引用(`Sheet1!A1:B2`)。
+    CrossRange { sheet: String, range: RangeRef },
+    /// 具名区域(定义名),求值时解析为其目标范围。
+    Name(String),
     /// 一元运算。
     Unary(UnOp, Box<Node>),
     /// 二元运算。

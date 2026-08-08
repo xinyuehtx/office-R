@@ -76,6 +76,8 @@
 
 ## 6. 边界与非目标
 
-- 非目标:动态数组溢出、跨表引用、具名区域、迭代计算开关、engineering/database/cube 类别。
+- 已支持:跨工作表引用(`Sheet!A1` / `'带空格'!A1:B2`)、具名区域(`define_name`)、
+  迭代计算(循环引用,Jacobi / Gauss–Seidel)。
+- 非目标:动态数组溢出(spill)、engineering/database/cube 类别。
 - 输入超过嵌套/长度上限时返回错误而非 panic。
 - 引擎**绝不 panic**:任何非法输入都映射为某个 `ExcelError`。

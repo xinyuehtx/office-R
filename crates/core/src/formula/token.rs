@@ -54,6 +54,8 @@ pub enum Token {
     Comma,
     /// `:`
     Colon,
+    /// `!`(工作表限定符,如 `Sheet1!A1`)
+    Bang,
 }
 
 /// 把公式**主体**(不含前导 `=`)切成记号序列。
@@ -81,6 +83,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, ExcelError> {
             b')' => push(&mut tokens, Token::RParen, &mut i),
             b',' => push(&mut tokens, Token::Comma, &mut i),
             b':' => push(&mut tokens, Token::Colon, &mut i),
+            b'!' => push(&mut tokens, Token::Bang, &mut i),
             b'=' => push(&mut tokens, Token::Eq, &mut i),
             b'<' => {
                 if bytes.get(i + 1) == Some(&b'>') {
@@ -109,6 +112,12 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, ExcelError> {
             b'#' => {
                 let (e, next) = lex_error(input, i)?;
                 tokens.push(Token::Err(e));
+                i = next;
+            }
+            // 带引号的工作表名 `'My Sheet'`(内部 `''` 表示一个字面量单引号)→ 作 Ident
+            b'\'' => {
+                let (name, next) = lex_quoted_name(input, i)?;
+                tokens.push(Token::Ident(name));
                 i = next;
             }
             _ if c.is_ascii_digit()
@@ -151,6 +160,41 @@ fn lex_ident(input: &str, start: usize) -> (String, usize) {
         i += 1;
     }
     (input[start..i].to_string(), i)
+}
+
+/// 词法:带引号的工作表名 `'...'`,内部 `''` 表示一个字面量单引号。
+fn lex_quoted_name(input: &str, start: usize) -> Result<(String, usize), ExcelError> {
+    let bytes = input.as_bytes();
+    let mut i = start + 1; // 跳过起始 '
+    let mut out = String::new();
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            if bytes.get(i + 1) == Some(&b'\'') {
+                out.push('\'');
+                i += 2;
+            } else {
+                return Ok((out, i + 1));
+            }
+        } else {
+            let ch_len = utf8_len(bytes[i]);
+            out.push_str(&input[i..i + ch_len]);
+            i += ch_len;
+        }
+    }
+    Err(ExcelError::Name) // 未闭合
+}
+
+/// UTF-8 首字节 → 该字符字节数。
+fn utf8_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else {
+        4
+    }
 }
 
 /// 词法层面的数字:整数/小数/科学计数。不处理正负号(交给一元运算符)。

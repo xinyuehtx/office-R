@@ -105,7 +105,7 @@ impl Parser {
         }
     }
 
-    /// 判定名称记号的身份:函数 / 布尔常量 / 单元格引用。
+    /// 判定名称记号的身份:函数 / 工作表限定引用 / 布尔常量 / 单元格引用 / 具名区域。
     fn classify_ident(&mut self, name: String) -> Result<Node, ExcelError> {
         // 后跟 `(` → 函数调用
         if self.peek() == Some(&Token::LParen) {
@@ -113,6 +113,11 @@ impl Parser {
             let args = self.parse_args()?;
             self.expect(&Token::RParen)?;
             return Ok(Node::Func(name.to_ascii_uppercase(), args));
+        }
+        // 后跟 `!` → 工作表限定引用 `Sheet!A1` 或 `Sheet!A1:B2`
+        if self.peek() == Some(&Token::Bang) {
+            self.pos += 1; // 吃掉 `!`
+            return self.parse_sheet_qualified(name);
         }
         // 布尔常量
         match name.to_ascii_uppercase().as_str() {
@@ -124,8 +129,31 @@ impl Parser {
         if let Some(cell) = CellRef::parse(&name) {
             return Ok(Node::Ref(cell));
         }
-        // 既不是函数也不是引用/常量 → 未知名称
-        Err(ExcelError::Name)
+        // 其余合法名称 → 具名区域(求值时解析);非法则由后续解析/求值报 #NAME?
+        Ok(Node::Name(name.to_ascii_uppercase()))
+    }
+
+    /// 解析 `!` 之后的部分:单元格或范围,归属工作表 `sheet`。
+    fn parse_sheet_qualified(&mut self, sheet: String) -> Result<Node, ExcelError> {
+        let first = match self.next() {
+            Some(Token::Ident(s)) => s,
+            _ => return Err(ExcelError::Name),
+        };
+        let cell = CellRef::parse(&first).ok_or(ExcelError::Name)?;
+        // 可能是范围 `A1:B2`
+        if self.peek() == Some(&Token::Colon) {
+            self.pos += 1;
+            let second = match self.next() {
+                Some(Token::Ident(s)) => s,
+                _ => return Err(ExcelError::Name),
+            };
+            let cell2 = CellRef::parse(&second).ok_or(ExcelError::Name)?;
+            return Ok(Node::CrossRange {
+                sheet,
+                range: RangeRef::from_corners(cell, cell2),
+            });
+        }
+        Ok(Node::CrossRef { sheet, cell })
     }
 
     /// 解析逗号分隔的实参列表(不含外层括号)。

@@ -13,6 +13,9 @@ pub fn register(m: &mut HashMap<&'static str, FuncImpl>) {
     m.insert("AVERAGE", average);
     m.insert("AVERAGEA", average); // 近似:与 AVERAGE 同处理数值
     m.insert("AVERAGEIF", averageif);
+    m.insert("AVERAGEIFS", averageifs);
+    m.insert("MAXIFS", maxifs);
+    m.insert("MINIFS", minifs);
     m.insert("COUNT", count);
     m.insert("COUNTA", counta);
     m.insert("COUNTBLANK", countblank);
@@ -118,6 +121,60 @@ fn averageif(ev: &mut Evaluator, args: &[Node]) -> Value {
         return Value::Error(ExcelError::Div0);
     }
     Value::Number(sum / cnt as f64)
+}
+
+/// `*IFS(val_range, crit_range1, crit1, ...)`:收集 val_range 中所有满足全部条件的**数值**。
+/// 参数形态非法(个数为偶、长度不齐)时返回 `Err`。
+fn matched_numbers(ev: &mut Evaluator, args: &[Node]) -> Result<Vec<f64>, ExcelError> {
+    if args.len() < 3 || args.len().is_multiple_of(2) {
+        return Err(ExcelError::Value);
+    }
+    let val_range = ev.flatten_arg(&args[0]);
+    let n = val_range.len();
+    let mut pairs = Vec::new();
+    let mut i = 1;
+    while i + 1 < args.len() {
+        let range = ev.flatten_arg(&args[i]);
+        let crit = ev.eval(&args[i + 1]);
+        if range.len() != n {
+            return Err(ExcelError::Value);
+        }
+        pairs.push((range, crit));
+        i += 2;
+    }
+    let mut out = Vec::new();
+    for idx in 0..n {
+        if pairs.iter().all(|(r, c)| matches_criteria(&r[idx], c)) {
+            if let Value::Number(x) = val_range[idx] {
+                out.push(x);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn averageifs(ev: &mut Evaluator, args: &[Node]) -> Value {
+    match matched_numbers(ev, args) {
+        Ok(xs) if xs.is_empty() => Value::Error(ExcelError::Div0),
+        Ok(xs) => Value::Number(xs.iter().sum::<f64>() / xs.len() as f64),
+        Err(e) => Value::Error(e),
+    }
+}
+
+fn maxifs(ev: &mut Evaluator, args: &[Node]) -> Value {
+    match matched_numbers(ev, args) {
+        Ok(xs) if xs.is_empty() => Value::Number(0.0),
+        Ok(xs) => Value::Number(xs.into_iter().fold(f64::NEG_INFINITY, f64::max)),
+        Err(e) => Value::Error(e),
+    }
+}
+
+fn minifs(ev: &mut Evaluator, args: &[Node]) -> Value {
+    match matched_numbers(ev, args) {
+        Ok(xs) if xs.is_empty() => Value::Number(0.0),
+        Ok(xs) => Value::Number(xs.into_iter().fold(f64::INFINITY, f64::min)),
+        Err(e) => Value::Error(e),
+    }
 }
 
 fn max(ev: &mut Evaluator, args: &[Node]) -> Value {
@@ -337,6 +394,37 @@ mod tests {
         assert_eq!(wb.eval_formula("LARGE(A1:A5,1)"), Value::Number(23.0));
         assert_eq!(wb.eval_formula("SMALL(A1:A5,2)"), Value::Number(8.0));
         assert_eq!(wb.eval_formula("RANK(16,A1:A5)"), Value::Number(2.0));
+    }
+
+    #[test]
+    fn multi_criteria_ifs() {
+        // A: 值,B: 类别。求 类别=x 的值的 均值/最大/最小
+        let mut wb = Workbook::new();
+        for (i, (v, cat)) in [(10, "x"), (20, "y"), (30, "x"), (40, "x")]
+            .iter()
+            .enumerate()
+        {
+            wb.set_input(i as u32, 0, &v.to_string()); // A
+            wb.set_input(i as u32, 1, cat); // B
+        }
+        // x 类:10, 30, 40
+        assert_eq!(
+            wb.eval_formula("AVERAGEIFS(A1:A4,B1:B4,\"x\")"),
+            Value::Number((10.0 + 30.0 + 40.0) / 3.0)
+        );
+        assert_eq!(
+            wb.eval_formula("MAXIFS(A1:A4,B1:B4,\"x\")"),
+            Value::Number(40.0)
+        );
+        assert_eq!(
+            wb.eval_formula("MINIFS(A1:A4,B1:B4,\"x\")"),
+            Value::Number(10.0)
+        );
+        // 组合条件:类别=x 且 值>15 → 30,40
+        assert_eq!(
+            wb.eval_formula("AVERAGEIFS(A1:A4,B1:B4,\"x\",A1:A4,\">15\")"),
+            Value::Number(35.0)
+        );
     }
 
     #[test]
