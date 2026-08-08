@@ -30,7 +30,8 @@ office-R 是一个**统一的 Office 三件套应用**(文档 / 表格 / 演示)
 ┌───────────────▼──────────────────────────────────────────────┐
 │  绑定层 office-wasm (crates/wasm/)                             │
 │  version / detect / render / parseCsvPacked(含公式求值)/       │
-│  WasmSheet     log.rs:与前端同格式的分级日志                    │
+│  WasmSheet(过滤/冻结)/ WasmWordDoc / WasmPresentation           │
+│  log.rs:与前端同格式的分级日志                                  │
 └───────────────┬──────────────────────────────────────────────┘
                 │ 纯 Rust 调用
 ┌───────────────▼──────────────────────────────────────────────┐
@@ -42,6 +43,9 @@ office-R 是一个**统一的 Office 三件套应用**(文档 / 表格 / 演示)
 │  ├─ formula/    公式引擎:token→parser→ast→eval + functions/    │
 │  │              值层 Workbook,对齐 Excel(140+ 函数)          │
 │  ├─ filter.rs   列过滤:按列条件全表扫描 → 命中行下标            │
+│  ├─ numfmt.rs   Excel 数字格式码 → 显示文本                      │
+│  ├─ docx.rs     Word:docx-rs 读路径 → 平面化文档模型 + 图片      │
+│  ├─ pptx.rs     PPT:zip+quick-xml 解析 → 幻灯模型 + 图片         │
 │  ├─ render.rs   RenderResult 摘要结构                           │
 │  ├─ word.rs · excel.rs · ppt.rs   docx / xlsx / pptx 摘要解析   │
 │  └─ lib.rs      render() 统一分发入口                            │
@@ -103,7 +107,9 @@ CSV 走下面的表格渲染路径;若把 CSV 传到 Word/演示页,会得到「
 内部持「可视行 → 底层行」映射,`rows()`/`window()` 据此重映射,**可视行始终连续 `0..V`**,
 所以渲染器的几何(等高行、列前缀和)**完全复用**,过滤对渲染器透明 —— 只有行头标签改为经
 `rowLabel` 显示原始行号。前端 `FilterBar` 收集条件,`renderer.refreshRows()` 保留滚动/缩放刷新。
-**冻结行列**在渲染器几何层做四象限独立偏移(计划中)。
+**冻结行列**(见 [RFC-0006](./rfcs/0006-word-excel-ppt-readonly.md)):`GridLayout` 记录
+`frozenRows/Cols` 与像素跨度;冻结时走**四象限全量重绘**隔离路径(不碰 50 万行滚动的瓦片
+热路径),`cellScreenRect`/`hitTest`/表头/覆盖层均冻结感知。数字格式化在 `core/numfmt.rs`。
 
 **为什么分两段**:解析必须离开主线程(否则大文件冻住 UI),而绘制取数必须同步
 (否则掉帧)。两段之间只有「移出 wasm 堆」和「移入 wasm 堆」两次必要拷贝,
@@ -244,6 +250,20 @@ CSV 表格页的落地:含 `=` 单元格的文件由 `formula::evaluate_sheet` �
 | 图表 | 独立组件,复用 `SheetHandle` 取数 | ❌ 混进表格渲染管线 |
 | xlsx 表格视图 | 新增解析入口产出 `Sheet`,视图层复用 `SheetHandle` 接口,**一行不改** | ❌ 为 xlsx 再写一套渲染 |
 
+## Word / PPT 只读渲染(`crates/core/src/{docx,pptx}.rs` + `web/apps/{word,ppt}`)
+
+见 [RFC-0006](./rfcs/0006-word-excel-ppt-readonly.md)。两条与表格并列的渲染管线,同样「重 CPU 在
+Rust、canvas 虚拟化 + 多级缓存」:
+
+- **Word**:`docx.rs` 用 `docx-rs` 读路径抽出平面化模型(段落/run/标题/对齐/列表/内联图片/表格);
+  `web/word/wordLayout` 做**流式布局**产出带绝对 y 的绘制项,`WordPage` 用 **sticky canvas + spacer**
+  纵向虚拟化(只画视口内的项)。字号/颜色经 serde 读 docx-rs 私有字段;图片字节 → Blob object URL。
+- **PPT**:`pptx.rs` 直接用 `zip + quick-xml` 解析 PresentationML(尺寸/顺序 → rels → spTree 形状/图片),
+  用元素名栈区分 spPr 填充与 rPr 颜色,EMU÷9525;`web/ppt/slideRender` 按 `fitScale` 等比铺进画布
+  (形状几何/填充、文本折行+对齐、图片),`PptPage` 提供缩略图导航、翻页与**全屏演示模式**。
+- **共享文本测量**(`web/shared/textMeasure.ts`):参考 pretext,`font→segment` 两级缓存 +
+  OffscreenCanvas + 字体加载失效 + 二分裁剪 + 折行,三个页面共用一个实例。
+
 ## 目录结构
 
 ```
@@ -251,11 +271,15 @@ office-R/
 ├── crates/            Rust cargo workspace
 │   ├── core/          office-core:平台无关计算内核
 │   │   ├── src/csv/   CSV 解析(decode / dialect / error)
-│   │   └── src/formula/  公式引擎(token/parser/ast/eval + functions/)
+│   │   ├── src/formula/  公式引擎(token/parser/ast/eval + functions/)
+│   │   └── {filter,numfmt,docx,pptx}.rs  过滤/数字格式/Word/PPT 解析
 │   └── wasm/          office-wasm:wasm-bindgen 绑定 + 日志
 ├── web/               React + Vite + TS 视图层(pnpm 管理)
-│   ├── src/apps/      三个页面 + shared 复用
-│   │   └── excel/grid/  canvas 渲染管线
+│   ├── src/apps/      word / excel / ppt 三页 + shared 复用
+│   │   ├── excel/grid/  canvas 表格渲染管线(瓦片/冻结/过滤)
+│   │   ├── word/        docx 模型 + 流式布局 + 虚拟化渲染
+│   │   ├── ppt/         幻灯模型 + slideRender + 演示模式
+│   │   └── shared/      textMeasure(共享测量缓存)等
 │   ├── src/wasm/      WASM 封装、解析 Worker(pkg/ 为构建产物,不入库)
 │   └── src/test/      测试基建:setup、canvas 替身、表格替身
 ├── docs/              RFC / Spec / Story / 报告 / 工作流 / 架构

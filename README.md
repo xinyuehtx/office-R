@@ -24,13 +24,17 @@
   (SUM/IF/VLOOKUP/DATE/PMT…),对齐运算符优先级、错误值(`#DIV/0!`)、类型强制与循环检测;
   网格显示计算值,选中后公式栏回显原始公式。点页面上的「加载公式示例」即可体验
   ([RFC-0004](./docs/rfcs/0004-formula-engine.md))
-- **列过滤**:按列条件筛选行(文本 / 数值 / 值集 / 空白,多列 AND),重扫描在 Rust/WASM 侧;
-  过滤后行头仍显示原始行号(冻结行列开发中,见 [RFC-0005](./docs/rfcs/0005-view-filter-freeze.md))
+- **列过滤 + 冻结行列 + 数字格式化**:按列筛选(文本/数值/值集/空白,多列 AND,重扫描在
+  Rust/WASM,行头保留原始行号);冻结首行/首列/到选区(四象限渲染);Excel 数字格式码渲染
+  (见 [RFC-0005](./docs/rfcs/0005-view-filter-freeze.md) / [RFC-0006](./docs/rfcs/0006-word-excel-ppt-readonly.md))
 
-本期**不含**数字/日期格式化、图表、单元格编辑与动态数组溢出 —— 详见
-[RFC-0003](./docs/rfcs/0003-csv-canvas-grid.md) 与 [RFC-0004](./docs/rfcs/0004-formula-engine.md) 的范围说明。
+**文档 · Word**:上传 `.docx`,在 canvas 上**流式布局渲染**——标题、正文、加粗/斜体/颜色、
+段落对齐、列表、图片、表格与图文混排;长文档纵向虚拟化。解析(docx-rs 读路径)在 Rust/WASM。
 
-**文档 · Word / 演示 · PowerPoint**:上传 `.docx` / `.pptx`,识别格式并给出解析摘要。
+**演示 · PowerPoint**:上传 `.pptx`,在 canvas 上渲染幻灯——文本框、图片、自选图形与对齐;
+缩略图导航 + **全屏演示模式**(方向键/Esc)。解析(zip + quick-xml 直接解析 OOXML)在 Rust/WASM。
+
+三个应用共用一套**文本测量缓存**(参考 pretext:canvas measureText + 分级缓存 + 字体加载失效)。
 
 ## 快速开始
 

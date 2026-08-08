@@ -14,9 +14,11 @@ office-R 是一个**统一的 Office 三件套应用**(文档 Word / 表格 Exce
 当前能力:
 
 - **表格页(本期重点)**:上传 **CSV** → WASM 解析(编码探测 / 分隔符嗅探 / 列切分)→ **canvas 表格视图**,支持滚动、缩放、键盘与拖拽。视图由**三张堆叠的 canvas** 组成(单元格 / 表头 / 覆盖层),叠加交给浏览器合成器用 GPU 完成;单元格层是超出视口一圈的瓦片,多数滚动帧只改 CSS transform、主线程零绘制。50 万行流畅浏览。见 [RFC-0003](./docs/rfcs/0003-csv-canvas-grid.md)。
-- **列过滤(视图层)**:按列条件筛选行(文本 / 数值 / 值集 / 空白,多列 AND)。重扫描在 `crates/core/src/filter.rs`;`WasmSheet` 持「可视行 → 底层行」映射,可视行连续 `0..V` 使**渲染几何完全复用**,行头经 `rowLabel` 显示原始行号。前端 `FilterBar` 收集条件。**冻结行列**(四象限)计划中。见 [RFC-0005](./docs/rfcs/0005-view-filter-freeze.md)。
+- **列过滤 + 冻结行列 + 数字格式化(视图层)**:列过滤(文本/数值/值集/空白,多列 AND)重扫描在 `crates/core/src/filter.rs`,`WasmSheet` 持「可视行→底层行」映射(可视行连续 `0..V`,渲染几何复用);**冻结行列**在 `GridLayout` 记录冻结跨度,冻结时走四象限全量重绘隔离路径;**数字格式化** `core/numfmt.rs`。见 [RFC-0005](./docs/rfcs/0005-view-filter-freeze.md) / [RFC-0006](./docs/rfcs/0006-word-excel-ppt-readonly.md)。
 - **公式计算引擎(Rust 侧)**:以 `=` 开头的单元格按 **Excel 语义**求值(词法 → 语法 → 求值 + 值层 `Workbook`),对齐 Excel 的运算符优先级、错误值(`#DIV/0!` 等)、类型强制与循环检测,内置 **140+ 函数**(math/stats/logical/text/date/lookup/info/financial)。之上是**计算管线**:依赖图(前驱/后继)+ 脏区跟踪 + 拓扑序增量重算(计算合并)+ 循环更新策略(默认 `#REF!`,可开启 Jacobi 迭代计算)。表格页显示计算值、公式栏回显原始公式。参考 HyperFormula / Univer 的函数目录,Rust 自研。见 [RFC-0004](./docs/rfcs/0004-formula-engine.md)。
-- **文档 / 演示页**:最小真实解析,打通「上传 → 识别 → 解析摘要」全链路。xlsx(calamine)、docx(docx-rs)、pptx(zip + quick-xml)。
+- **文档页(Word 只读)**:`core/docx.rs` 用 docx-rs 读路径抽出平面化模型(段落/标题/对齐/列表/图片/表格),`web/word` 流式布局 + sticky canvas 纵向虚拟化渲染(文字/加粗斜体/颜色/对齐/列表/图文混排/表格)。见 [RFC-0006](./docs/rfcs/0006-word-excel-ppt-readonly.md)。
+- **演示页(PPT 只读)**:`core/pptx.rs` 用 zip+quick-xml 直接解析 PresentationML → 幻灯模型(文本框/图片/自选图形/对齐,EMU÷9525),`web/ppt` canvas 渲染 + 缩略图导航 + **全屏演示模式**。见 [RFC-0006](./docs/rfcs/0006-word-excel-ppt-readonly.md)。
+- **共享文本测量**:`web/apps/shared/textMeasure.ts` 参考 pretext(canvas measureText + `font→segment` 两级缓存 + 字体加载失效 + 二分裁剪 + 折行),三页共用。
 
 解析失败优雅降级:错误类型清晰(`thiserror`)、提示中文可操作、可重新选择文件重试。
 
@@ -44,14 +46,19 @@ web/ (React 视图)  ──wasm-bindgen──▶  crates/wasm (绑定)  ──�
 ## 目录结构
 
 ```
-crates/core/        Rust 计算内核(format/sheet/csv/formula/filter/render/word/excel/ppt)
+crates/core/        Rust 计算内核(format/sheet/csv/formula/filter/numfmt/docx/pptx/render/word/excel/ppt)
   src/formula/      公式引擎:token/parser/ast/eval + functions/(math/stats/logical/…)
   src/filter.rs     列过滤:条件 → 命中行下标(供视图层行映射)
-crates/wasm/        WASM 绑定(version/detect/render/parseCsvPacked〔含公式求值〕/WasmSheet)+ 分级日志
+  src/numfmt.rs     Excel 数字格式码 → 显示文本
+  src/docx.rs       Word:docx-rs 读路径 → 平面化文档模型 + 图片
+  src/pptx.rs       PPT:zip+quick-xml 解析 → 幻灯模型 + 图片
+crates/wasm/        WASM 绑定(…/WasmSheet/WasmWordDoc/WasmPresentation)+ 分级日志
 web/                React + Vite + TS(pnpm)
-  src/apps/         三个页面 + shared 复用(OfficePage/FileUpload/useOfficeFile/
-                    useCsvFile/SheetHandle/logger)
-  src/apps/excel/grid/  canvas 渲染管线(geometry/tile/layers/renderer/input/labels/theme)
+  src/apps/         word / excel / ppt 三页 + shared 复用
+  src/apps/excel/grid/  canvas 表格渲染(geometry/tile/layers/renderer,含冻结/过滤)
+  src/apps/word/    docx 模型 + wordLayout 流式布局 + WordPage 虚拟化
+  src/apps/ppt/     幻灯模型 + slideRender + PptPage 导航/演示
+  src/apps/shared/  textMeasure(共享测量缓存)等
   src/wasm/         WASM 加载封装 + csvWorker 解析线程(pkg/ 为构建产物,不入库)
   src/test/         测试基建(setup/canvas 替身/表格替身)
 docs/               workflow / architecture / rfcs / specs / stories / reports
