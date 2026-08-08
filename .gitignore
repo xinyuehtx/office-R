@@ -33,6 +33,12 @@ coverage/
 # ---------- 工具临时产物 ----------
 .playwright-mcp/
 
+# ---------- Playwright e2e 产物 ----------
+/web/test-results/
+/web/playwright-report/
+/web/blob-report/
+/web/.playwright/
+
 # ---------- Claude Code 本地个人设置 ----------
 .claude/settings.local.json
 

@@ -12,6 +12,7 @@ import init, {
   WasmPresentation,
 } from "./pkg/office_wasm.js";
 import { getLogLevel, onLogLevelChange } from "../apps/shared/logger";
+import { imageKey } from "../apps/ppt/model";
 import type {
   CellFormula,
   CellWindowData,
@@ -230,7 +231,6 @@ export async function loadDocx(bytes: Uint8Array): Promise<import("../apps/word/
  */
 export async function loadPptx(bytes: Uint8Array): Promise<import("../apps/ppt/model").PptDocument> {
   await ensureReady();
-  const { imageKey } = await import("../apps/ppt/model");
   const handle = WasmPresentation.parse(bytes);
   try {
     const presentation = handle.model as import("../apps/ppt/model").Presentation;

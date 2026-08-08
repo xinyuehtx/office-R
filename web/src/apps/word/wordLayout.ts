@@ -168,11 +168,11 @@ function layoutParagraph(
   }
   pushLine();
 
-  // 列表前缀(画在第一行左侧)
+  // 列表前缀(画在第一行左侧):有序用「序号.」,无序用项目符号
   const bulletFont = `${base.px}px ${FONT_FAMILY}`;
   const prefix = p.list
     ? p.list.ordered
-      ? "1."
+      ? `${p.list.number ?? 1}.`
       : "•"
     : "";
 
@@ -197,7 +197,16 @@ function layoutParagraph(
     let startX = left;
     if (p.align === "center") startX = left + (avail - line.width) / 2;
     else if (p.align === "right") startX = left + (avail - line.width);
-    // justify 简化为左对齐(见模块说明)
+
+    // 两端对齐:非末行把富余宽度均摊到词间空白(末行左对齐,与 Word 一致)
+    const isLastLine = li === lines.length - 1;
+    let spaceStretch = 0;
+    if (p.align === "justify" && !isLastLine) {
+      const spaceCount = line.tokens.filter((t) => t.type === "space").length;
+      if (spaceCount > 0 && line.width < avail) {
+        spaceStretch = (avail - line.width) / spaceCount;
+      }
+    }
 
     // 列表符号只在首行
     const segments: TextSegment[] = [];
@@ -233,7 +242,7 @@ function layoutParagraph(
         });
         cx += t.width;
       } else if (t.type === "space") {
-        cx += t.width; // 空白
+        cx += t.width + spaceStretch; // 空白(两端对齐时含拉伸)
       }
     }
     if (segments.length > 0) {

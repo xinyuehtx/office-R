@@ -69,7 +69,7 @@ describe("wordLayout", () => {
 
   it("列表项带项目符号前缀", () => {
     const layout = layoutDoc(
-      { blocks: [para([run("列表项")], { list: { level: 0, ordered: false } })] },
+      { blocks: [para([run("列表项")], { list: { level: 0, ordered: false, number: null } })] },
       820,
       measurer,
     );
@@ -141,5 +141,39 @@ describe("wordLayout", () => {
       ],
     };
     expect(imageIdsIn(model)).toEqual(["rIdX"]);
+  });
+});
+
+describe("wordLayout · 列表编号与两端对齐", () => {
+  it("有序列表前缀用序号", () => {
+    const layout = layoutDoc(
+      { blocks: [para([run("第一项")], { list: { level: 0, ordered: true, number: 3 } })] },
+      820,
+      measurer,
+    );
+    const line = layout.items.find((i) => i.kind === "textline");
+    expect(line?.kind === "textline" && line.segments.some((s) => s.text === "3.")).toBe(true);
+  });
+
+  it("两端对齐:非末行词间被拉伸(首词起点不左移,行更宽)", () => {
+    // 造一段有多个空格的英文,窄宽度强制折行
+    const text = "aa bb cc dd ee ff gg hh ii jj kk ll mm nn oo pp";
+    const justified = layoutDoc(
+      { blocks: [para([run(text)], { align: "justify" })] },
+      300,
+      measurer,
+    );
+    const left = layoutDoc({ blocks: [para([run(text)])] }, 300, measurer);
+    const jLines = justified.items.filter((i) => i.kind === "textline");
+    const lLines = left.items.filter((i) => i.kind === "textline");
+    expect(jLines.length).toBeGreaterThan(1);
+    // 非末行:两端对齐的最后一个词右缘应比左对齐更靠右(空白被拉伸)
+    const jFirst = jLines[0];
+    const lFirst = lLines[0];
+    if (jFirst.kind === "textline" && lFirst.kind === "textline") {
+      const jLastSeg = jFirst.segments[jFirst.segments.length - 1];
+      const lLastSeg = lFirst.segments[lFirst.segments.length - 1];
+      expect(jLastSeg.x).toBeGreaterThan(lLastSeg.x);
+    }
   });
 });

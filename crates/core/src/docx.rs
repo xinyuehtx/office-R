@@ -35,6 +35,8 @@ pub struct ListItem {
     pub level: u8,
     /// 是否有序(编号);否则为项目符号。
     pub ordered: bool,
+    /// 有序列表的序号(从 1 起,按同一 numId+level 递增);无序为 `None`。
+    pub number: Option<u32>,
 }
 
 /// 一段文本 run(同一批格式)。
@@ -145,20 +147,62 @@ fn emu_to_px(emu: u32) -> f64 {
     emu as f64 / 9525.0
 }
 
+/// 解析上下文:携带编号定义与运行期序号计数。
+struct Ctx {
+    /// numId → (level → 是否有序)。
+    ordered: std::collections::HashMap<usize, std::collections::HashMap<usize, bool>>,
+    /// 有序列表运行期计数:(numId, level) → 已出现的序号。
+    counters: std::collections::HashMap<(usize, usize), u32>,
+}
+
 /// 解析 docx 字节为文档模型。
 pub fn parse(bytes: &[u8]) -> Result<ParsedDoc, String> {
     let docx = docx_rs::read_docx(bytes).map_err(|e| format!("{e:?}"))?;
     let images = collect_images(&docx);
+    let mut ctx = Ctx {
+        ordered: build_numbering_map(&docx),
+        counters: std::collections::HashMap::new(),
+    };
     let blocks = docx
         .document
         .children
         .iter()
-        .filter_map(convert_child)
+        .filter_map(|c| convert_child(c, &mut ctx))
         .collect();
     Ok(ParsedDoc {
         doc: WordDoc { blocks },
         images,
     })
+}
+
+/// 从 `numbering.xml`(docx-rs 的 `numberings`)构建 numId → level → 是否有序。
+///
+/// 路径:`Numbering{id, abstract_num_id}` → `AbstractNumbering{levels}` →
+/// `Level{level, format.val}`。`format.val` 为 `"bullet"`/`"none"` → 无序;
+/// `"decimal"`/`"lowerRoman"`/`"upperLetter"`/… → 有序。
+fn build_numbering_map(
+    docx: &Docx,
+) -> std::collections::HashMap<usize, std::collections::HashMap<usize, bool>> {
+    use std::collections::HashMap;
+    // abstract_num_id → (level → ordered)
+    let mut abstracts: HashMap<usize, HashMap<usize, bool>> = HashMap::new();
+    for an in &docx.numberings.abstract_nums {
+        let mut levels = HashMap::new();
+        for lvl in &an.levels {
+            let fmt = lvl.format.val.to_ascii_lowercase();
+            let ordered = !matches!(fmt.as_str(), "bullet" | "none");
+            levels.insert(lvl.level, ordered);
+        }
+        abstracts.insert(an.id, levels);
+    }
+    // numId → abstract → 展开
+    let mut map: HashMap<usize, HashMap<usize, bool>> = HashMap::new();
+    for num in &docx.numberings.numberings {
+        if let Some(levels) = abstracts.get(&num.abstract_num_id) {
+            map.insert(num.id, levels.clone());
+        }
+    }
+    map
 }
 
 /// 收集图片字节。
@@ -203,15 +247,15 @@ fn mime_of(path: &str) -> String {
     .to_string()
 }
 
-fn convert_child(child: &DocumentChild) -> Option<Block> {
+fn convert_child(child: &DocumentChild, ctx: &mut Ctx) -> Option<Block> {
     match child {
-        DocumentChild::Paragraph(p) => Some(Block::Paragraph(convert_paragraph(p))),
-        DocumentChild::Table(t) => Some(Block::Table(convert_table(t))),
+        DocumentChild::Paragraph(p) => Some(Block::Paragraph(convert_paragraph(p, ctx))),
+        DocumentChild::Table(t) => Some(Block::Table(convert_table(t, ctx))),
         _ => None,
     }
 }
 
-fn convert_paragraph(p: &DxParagraph) -> Paragraph {
+fn convert_paragraph(p: &DxParagraph, ctx: &mut Ctx) -> Paragraph {
     let prop = &p.property;
 
     // 标题级别:pStyle 形如 "Heading1".."Heading6"(或本地化 id)
@@ -224,13 +268,27 @@ fn convert_paragraph(p: &DxParagraph) -> Paragraph {
         .map(|j| align_of(&justification_str(j)))
         .unwrap_or(Align::Left);
 
-    // 列表
+    // 列表:查 numbering 定 有序/无序;有序则按 (numId, level) 递增算序号
     let list = prop.numbering_property.as_ref().map(|np| {
-        let level = np.level.as_ref().map(|l| l.val as u8).unwrap_or(0);
-        // 有序/无序需查 numbering.xml;此处按层级奇偶给个稳妥默认(无法确定时按项目符号)。
+        let level = np.level.as_ref().map(|l| l.val).unwrap_or(0);
+        let num_id = np.id.as_ref().map(|i| i.id);
+        let ordered = num_id
+            .and_then(|id| ctx.ordered.get(&id))
+            .and_then(|lv| lv.get(&level))
+            .copied()
+            .unwrap_or(false);
+        let number = if ordered {
+            let id = num_id.unwrap_or(0);
+            let c = ctx.counters.entry((id, level)).or_insert(0);
+            *c += 1;
+            Some(*c)
+        } else {
+            None
+        };
         ListItem {
-            level,
-            ordered: false,
+            level: level as u8,
+            ordered,
+            number,
         }
     });
 
@@ -370,7 +428,7 @@ fn heading_level(style: &str) -> Option<u8> {
     digits.parse::<u8>().ok().filter(|n| (1..=6).contains(n))
 }
 
-fn convert_table(t: &docx_rs::Table) -> Table {
+fn convert_table(t: &docx_rs::Table, ctx: &mut Ctx) -> Table {
     let mut rows = Vec::new();
     for TableChild::TableRow(row) in &t.rows {
         let mut cells = Vec::new();
@@ -379,10 +437,10 @@ fn convert_table(t: &docx_rs::Table) -> Table {
             for content in &cell.children {
                 match content {
                     TableCellContent::Paragraph(p) => {
-                        blocks.push(Block::Paragraph(convert_paragraph(p)));
+                        blocks.push(Block::Paragraph(convert_paragraph(p, ctx)));
                     }
                     TableCellContent::Table(t) => {
-                        blocks.push(Block::Table(convert_table(t)));
+                        blocks.push(Block::Table(convert_table(t, ctx)));
                     }
                     _ => {}
                 }
@@ -398,8 +456,9 @@ fn convert_table(t: &docx_rs::Table) -> Table {
 mod tests {
     use super::{parse, Align, Block, Inline, Paragraph};
     use docx_rs::{
-        AlignmentType, Docx, Paragraph as DxPara, Run as DxRun, Table as DxTable,
-        TableCell as DxCell, TableRow as DxRow,
+        AbstractNumbering, AlignmentType, Docx, IndentLevel, Level, LevelJc, LevelText,
+        NumberFormat, Numbering, NumberingId, Paragraph as DxPara, Run as DxRun, Start,
+        Table as DxTable, TableCell as DxCell, TableRow as DxRow,
     };
 
     /// 用 docx-rs 的写路径构造一份 docx 字节作为测试夹具。
@@ -470,6 +529,70 @@ mod tests {
             .expect("应有表格");
         assert_eq!(table_block.rows.len(), 1);
         assert_eq!(table_block.rows[0].cells.len(), 2);
+    }
+
+    #[test]
+    fn parses_ordered_and_bullet_lists() {
+        // abstract 0 = 有序(decimal),abstract 1 = 无序(bullet)
+        let ordered_abs = AbstractNumbering::new(0).add_level(Level::new(
+            0,
+            Start::new(1),
+            NumberFormat::new("decimal"),
+            LevelText::new("%1."),
+            LevelJc::new("left"),
+        ));
+        let bullet_abs = AbstractNumbering::new(1).add_level(Level::new(
+            0,
+            Start::new(1),
+            NumberFormat::new("bullet"),
+            LevelText::new("•"),
+            LevelJc::new("left"),
+        ));
+        let mut buf = Vec::new();
+        Docx::new()
+            .add_abstract_numbering(ordered_abs)
+            .add_abstract_numbering(bullet_abs)
+            .add_numbering(Numbering::new(1, 0)) // numId 1 → 有序
+            .add_numbering(Numbering::new(2, 1)) // numId 2 → 无序
+            .add_paragraph(
+                DxPara::new()
+                    .numbering(NumberingId::new(1), IndentLevel::new(0))
+                    .add_run(DxRun::new().add_text("第一项")),
+            )
+            .add_paragraph(
+                DxPara::new()
+                    .numbering(NumberingId::new(1), IndentLevel::new(0))
+                    .add_run(DxRun::new().add_text("第二项")),
+            )
+            .add_paragraph(
+                DxPara::new()
+                    .numbering(NumberingId::new(2), IndentLevel::new(0))
+                    .add_run(DxRun::new().add_text("要点")),
+            )
+            .build()
+            .pack(&mut std::io::Cursor::new(&mut buf))
+            .expect("打包");
+        let parsed = parse(&buf).expect("解析");
+        let paras: Vec<&Paragraph> = parsed
+            .doc
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Paragraph(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        // 前两段有序,序号 1、2
+        let l0 = paras[0].list.as_ref().expect("列表");
+        assert!(l0.ordered);
+        assert_eq!(l0.number, Some(1));
+        let l1 = paras[1].list.as_ref().expect("列表");
+        assert!(l1.ordered);
+        assert_eq!(l1.number, Some(2));
+        // 第三段无序
+        let l2 = paras[2].list.as_ref().expect("列表");
+        assert!(!l2.ordered);
+        assert_eq!(l2.number, None);
     }
 
     #[test]

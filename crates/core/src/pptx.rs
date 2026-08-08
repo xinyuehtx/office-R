@@ -9,8 +9,9 @@
 //!
 //! EMU→px:914400 EMU=1 英寸=96px,即 ÷9525;字号 `sz` 为百分之一磅,px = sz/100 × 4/3。
 //!
-//! **非目标**:母版/版式继承(占位符无显式 xfrm 时不渲染)、主题配色(schemeClr)、
-//! 动画/切换、SmartArt/图表、组合形状子坐标、旋转翻转、自定义几何。
+//! **已支持**:占位符几何**继承**(slide 无 xfrm → 借 slideLayout → slideMaster)、
+//! 主题配色 `schemeClr`(解析 `ppt/theme/theme1.xml` 的 `clrScheme`,含 tx1/bg1→dk1/lt1 默认映射)。
+//! **非目标**:动画/切换、SmartArt/图表、组合形状子坐标、旋转翻转、自定义几何、文本默认样式继承。
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -111,6 +112,7 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedPpt, String> {
 
     let (width_px, height_px) = read_slide_size(&mut zip).unwrap_or((960.0, 540.0));
     let slide_paths = ordered_slide_paths(&mut zip);
+    let theme = load_theme(&mut zip);
 
     let mut slides = Vec::new();
     let mut images = Vec::new();
@@ -122,7 +124,12 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedPpt, String> {
             Err(_) => continue,
         };
         let rels = read_slide_rels(&mut zip, path);
-        let shapes = parse_slide(&xml);
+        let fallback = layout_master_geom(&mut zip, &rels);
+        let ctx = SlideCtx {
+            theme: &theme,
+            fallback: &fallback,
+        };
+        let shapes = parse_slide(&xml, &ctx);
         slides.push(Slide { shapes });
 
         // 收集该幻灯用到的图片字节
@@ -340,6 +347,10 @@ struct ShapeBuilder {
     fill: Option<String>,
     image: Option<String>,
     paragraphs: Vec<Para>,
+    /// 占位符键 `type|idx`(用于向版式/母版借几何);非占位符为 `None`。
+    ph: Option<String>,
+    /// 本形状是否带显式 `a:xfrm`(有则不向版式借几何)。
+    has_xfrm: bool,
 }
 
 impl ShapeBuilder {
@@ -356,13 +367,26 @@ impl ShapeBuilder {
         }
     }
     fn is_renderable(&self) -> bool {
-        // 有显式几何(位置/尺寸)或有文本才渲染;占位符无 xfrm 则跳过
+        // 有显式几何(位置/尺寸)或有文本才渲染;占位符无 xfrm 又借不到几何则跳过
         self.width > 0.0 || self.height > 0.0 || !self.paragraphs.is_empty()
     }
 }
 
+/// 主题配色:scheme 名(dk1/lt1/accent1/…)→ `RRGGBB`。
+type Theme = std::collections::HashMap<String, String>;
+/// 占位符几何:`type|idx` → (x, y, w, h)(像素)。
+type PhGeom = std::collections::HashMap<String, (f64, f64, f64, f64)>;
+
+/// 幻灯解析上下文:主题配色 + 占位符几何回退(来自版式/母版)。
+struct SlideCtx<'a> {
+    theme: &'a Theme,
+    fallback: &'a PhGeom,
+}
+
 /// 解析单张幻灯的形状树。用元素名栈跟踪上下文(区分 spPr 填充 vs rPr 颜色等)。
-fn parse_slide(xml: &str) -> Vec<Shape> {
+///
+/// `ctx` 提供主题配色(解析 `schemeClr`)与占位符几何回退(占位符 sp 无 xfrm 时借用版式/母版)。
+fn parse_slide(xml: &str, ctx: &SlideCtx) -> Vec<Shape> {
     let mut reader = XmlReader::from_str(xml);
     let mut buf = Vec::new();
     let mut shapes = Vec::new();
@@ -377,17 +401,40 @@ fn parse_slide(xml: &str) -> Vec<Shape> {
             // Start:处理后压栈(有对应 End)
             Event::Start(e) => {
                 let name = local(&e);
-                handle_start(&e, &name, &stack, &mut cur, &mut cur_para, &mut cur_run);
+                handle_start(
+                    &e,
+                    &name,
+                    &stack,
+                    ctx.theme,
+                    &mut cur,
+                    &mut cur_para,
+                    &mut cur_run,
+                );
                 stack.push(name);
             }
             // Empty:处理但**不压栈**(无对应 End),用当前栈作为其上下文
             Event::Empty(e) => {
                 let name = local(&e);
-                handle_start(&e, &name, &stack, &mut cur, &mut cur_para, &mut cur_run);
+                handle_start(
+                    &e,
+                    &name,
+                    &stack,
+                    ctx.theme,
+                    &mut cur,
+                    &mut cur_para,
+                    &mut cur_run,
+                );
             }
             Event::End(_e) => {
                 let name = stack.pop().unwrap_or_default();
-                handle_end(&name, &mut shapes, &mut cur, &mut cur_para, &mut cur_run);
+                handle_end(
+                    &name,
+                    ctx.fallback,
+                    &mut shapes,
+                    &mut cur,
+                    &mut cur_para,
+                    &mut cur_run,
+                );
             }
             Event::Text(t) => {
                 if stack.last().map(|s| s.as_str()) == Some("t") {
@@ -407,10 +454,217 @@ fn parse_slide(xml: &str) -> Vec<Shape> {
     shapes
 }
 
+/// 加载主题配色:从 `ppt/theme/theme1.xml` 的 `a:clrScheme` 取各 scheme 名 → RRGGBB。
+/// 每个 scheme 子元素(dk1/lt1/dk2/lt2/accent1..6/hlink/folHlink)含 `srgbClr@val` 或 `sysClr@lastClr`。
+fn load_theme(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> Theme {
+    let mut theme = Theme::new();
+    let xml = match read_zip_text(zip, "ppt/theme/theme1.xml") {
+        Ok(x) => x,
+        Err(_) => return theme,
+    };
+    let mut reader = XmlReader::from_str(&xml);
+    let mut buf = Vec::new();
+    let mut in_scheme = false;
+    let mut cur_name: Option<String> = None; // 当前 scheme 槽名(dk1/accent1/…)
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let n = local(&e);
+                if n == "clrScheme" {
+                    in_scheme = true;
+                } else if in_scheme && cur_name.is_none() && n != "srgbClr" && n != "sysClr" {
+                    cur_name = Some(n);
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let n = local(&e);
+                if in_scheme {
+                    if let Some(slot) = cur_name.clone() {
+                        if n == "srgbClr" {
+                            if let Some(v) = attr(&e, "val") {
+                                theme.insert(slot, v);
+                                cur_name = None;
+                            }
+                        } else if n == "sysClr" {
+                            if let Some(v) = attr(&e, "lastClr") {
+                                theme.insert(slot, v);
+                                cur_name = None;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                let n = local_end(&e);
+                if n == "clrScheme" {
+                    break;
+                }
+                // scheme 槽结束(如 </a:dk1>):清空当前槽名
+                if in_scheme && Some(&n) == cur_name.as_ref() {
+                    cur_name = None;
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    theme
+}
+
+/// 把 `schemeClr@val`(tx1/bg1/accent1/…)解析成 RRGGBB。
+/// 标准默认 clrMap:tx1→dk1、bg1→lt1、tx2→dk2、bg2→lt2;其余同名直查。
+fn resolve_scheme_color(theme: &Theme, val: &str) -> Option<String> {
+    let key = match val {
+        "tx1" => "dk1",
+        "bg1" => "lt1",
+        "tx2" => "dk2",
+        "bg2" => "lt2",
+        other => other,
+    };
+    theme.get(key).or_else(|| theme.get(val)).cloned()
+}
+
+/// 从 slide rels 找到版式与母版,提取占位符几何(`type|idx` → 像素矩形)。母版打底、版式覆盖。
+fn layout_master_geom(
+    zip: &mut ZipArchive<Cursor<Vec<u8>>>,
+    slide_rels: &[(String, String)],
+) -> PhGeom {
+    let mut geom = PhGeom::new();
+    // slide → 版式
+    let layout_path = slide_rels
+        .iter()
+        .find(|(_, t)| t.contains("slideLayout"))
+        .map(|(_, t)| normalize_ppt_path(&t.replace("../", "")));
+    let Some(layout_path) = layout_path else {
+        return geom;
+    };
+    // 版式 → 母版
+    let layout_rels = read_rels_for(zip, &layout_path);
+    if let Some(master) = layout_rels
+        .iter()
+        .find(|(_, t)| t.contains("slideMaster"))
+        .map(|(_, t)| normalize_ppt_path(&t.replace("../", "")))
+    {
+        if let Ok(xml) = read_zip_text(zip, &master) {
+            for (k, v) in collect_placeholder_geom(&xml) {
+                geom.insert(k, v); // 母版打底
+            }
+        }
+    }
+    if let Ok(xml) = read_zip_text(zip, &layout_path) {
+        for (k, v) in collect_placeholder_geom(&xml) {
+            geom.insert(k, v); // 版式覆盖母版
+        }
+    }
+    geom
+}
+
+/// 读取任意部件的 `_rels/<file>.rels`。
+fn read_rels_for(zip: &mut ZipArchive<Cursor<Vec<u8>>>, part_path: &str) -> Vec<(String, String)> {
+    let rels_path = match part_path.rsplit_once('/') {
+        Some((dir, file)) => format!("{dir}/_rels/{file}.rels"),
+        None => format!("_rels/{part_path}.rels"),
+    };
+    match read_zip_text(zip, &rels_path) {
+        Ok(xml) => parse_rels(&xml).into_iter().collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 从版式/母版 XML 提取占位符几何:遍历 sp,记 ph 键与 xfrm,有 xfrm 者入表。
+fn collect_placeholder_geom(xml: &str) -> PhGeom {
+    let mut reader = XmlReader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut out = PhGeom::new();
+    let mut ph: Option<String> = None;
+    let mut xfrm: Option<(f64, f64, f64, f64)> = None;
+    let mut in_sp = false;
+    let (mut x, mut y, mut w, mut h) = (0.0, 0.0, 0.0, 0.0);
+    let mut has_off = false;
+    let mut has_ext = false;
+
+    macro_rules! handle_geom {
+        ($e:expr, $n:expr) => {
+            match $n {
+                "ph" => {
+                    let ty = attr($e, "type").unwrap_or_default();
+                    let idx = attr($e, "idx").unwrap_or_default();
+                    ph = Some(format!("{ty}|{idx}"));
+                }
+                "off" => {
+                    x = attr($e, "x")
+                        .and_then(|s| s.parse().ok())
+                        .map(emu)
+                        .unwrap_or(0.0);
+                    y = attr($e, "y")
+                        .and_then(|s| s.parse().ok())
+                        .map(emu)
+                        .unwrap_or(0.0);
+                    has_off = true;
+                }
+                "ext" => {
+                    w = attr($e, "cx")
+                        .and_then(|s| s.parse().ok())
+                        .map(emu)
+                        .unwrap_or(0.0);
+                    h = attr($e, "cy")
+                        .and_then(|s| s.parse().ok())
+                        .map(emu)
+                        .unwrap_or(0.0);
+                    has_ext = true;
+                }
+                _ => {}
+            }
+        };
+    }
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let n = local(&e);
+                if n == "sp" {
+                    in_sp = true;
+                    ph = None;
+                    has_off = false;
+                    has_ext = false;
+                }
+                if in_sp {
+                    handle_geom!(&e, n.as_str());
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if in_sp {
+                    let n = local(&e);
+                    handle_geom!(&e, n.as_str());
+                }
+            }
+            Ok(Event::End(e)) => {
+                if local_end(&e) == "sp" {
+                    if has_off && has_ext {
+                        xfrm = Some((x, y, w, h));
+                    }
+                    if let (Some(k), Some(g)) = (ph.take(), xfrm.take()) {
+                        out.entry(k).or_insert(g);
+                    }
+                    in_sp = false;
+                    xfrm = None;
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 fn handle_start(
     e: &BytesStart,
     name: &str,
     stack: &[String],
+    theme: &Theme,
     cur: &mut Option<ShapeBuilder>,
     cur_para: &mut Option<Para>,
     cur_run: &mut Option<Run>,
@@ -419,8 +673,17 @@ fn handle_start(
         "sp" | "pic" => {
             *cur = Some(ShapeBuilder::default());
         }
+        "ph" => {
+            // 占位符标识:type|idx(缺省空),用于向版式/母版借几何
+            if let Some(b) = cur.as_mut() {
+                let ty = attr(e, "type").unwrap_or_default();
+                let idx = attr(e, "idx").unwrap_or_default();
+                b.ph = Some(format!("{ty}|{idx}"));
+            }
+        }
         "off" => {
             if let Some(b) = cur.as_mut() {
+                b.has_xfrm = true;
                 if let Some(x) = attr(e, "x").and_then(|s| s.parse::<f64>().ok()) {
                     b.x = emu(x);
                 }
@@ -451,9 +714,17 @@ fn handle_start(
                 }
             }
         }
-        "srgbClr" => {
-            let val = attr(e, "val");
-            if let Some(v) = val {
+        // 直接色(srgbClr)与主题色(schemeClr,经 theme 解析)统一处理
+        "srgbClr" | "schemeClr" => {
+            let raw = attr(e, "val");
+            let resolved = raw.and_then(|v| {
+                if name == "schemeClr" {
+                    resolve_scheme_color(theme, &v)
+                } else {
+                    Some(v)
+                }
+            });
+            if let Some(v) = resolved {
                 if stack.iter().any(|s| s == "rPr") {
                     if let Some(r) = cur_run.as_mut() {
                         r.color = Some(v);
@@ -508,6 +779,7 @@ fn handle_start(
 
 fn handle_end(
     name: &str,
+    fallback: &PhGeom,
     shapes: &mut Vec<Shape>,
     cur: &mut Option<ShapeBuilder>,
     cur_para: &mut Option<Para>,
@@ -527,7 +799,18 @@ fn handle_end(
             }
         }
         "sp" | "pic" => {
-            if let Some(b) = cur.take() {
+            if let Some(mut b) = cur.take() {
+                // 占位符无显式 xfrm:向版式/母版借几何
+                if !b.has_xfrm {
+                    if let Some(key) = &b.ph {
+                        if let Some(&(x, y, w, h)) = fallback.get(key) {
+                            b.x = x;
+                            b.y = y;
+                            b.width = w;
+                            b.height = h;
+                        }
+                    }
+                }
                 if b.is_renderable() {
                     shapes.push(b.finish());
                 }
@@ -539,8 +822,15 @@ fn handle_end(
 
 /// 元素本地名(去命名空间前缀)。
 fn local(e: &BytesStart) -> String {
-    let full = e.name();
-    let bytes = full.as_ref();
+    local_from(e.name().as_ref())
+}
+
+/// 结束标签的本地名。
+fn local_end(e: &quick_xml::events::BytesEnd) -> String {
+    local_from(e.name().as_ref())
+}
+
+fn local_from(bytes: &[u8]) -> String {
     let name = std::str::from_utf8(bytes).unwrap_or("");
     name.rsplit(':').next().unwrap_or(name).to_string()
 }
@@ -605,9 +895,19 @@ mod tests {
       </p:spTree></p:cSld>
     </p:sld>"#;
 
+    /// 无主题、无回退的空上下文。
+    fn empty_ctx() -> (Theme, PhGeom) {
+        (Theme::new(), PhGeom::new())
+    }
+
     #[test]
     fn parses_shapes_text_geometry_fill() {
-        let shapes = parse_slide(std::str::from_utf8(SLIDE).unwrap());
+        let (theme, fallback) = empty_ctx();
+        let ctx = SlideCtx {
+            theme: &theme,
+            fallback: &fallback,
+        };
+        let shapes = parse_slide(std::str::from_utf8(SLIDE).unwrap(), &ctx);
         assert_eq!(shapes.len(), 2);
         let sp = &shapes[0];
         assert_eq!(sp.x, 96.0); // 914400 EMU = 96px
@@ -672,6 +972,81 @@ mod tests {
     #[test]
     fn invalid_bytes_error() {
         assert!(parse(b"not a pptx").is_err());
+    }
+
+    #[test]
+    fn theme_scheme_color_resolved() {
+        // 主题:accent1=4472C4、dk1=000000;schemeClr 用 accent1 与 tx1(→dk1)
+        let mut theme = Theme::new();
+        theme.insert("accent1".into(), "4472C4".into());
+        theme.insert("dk1".into(), "1A1A1A".into());
+        assert_eq!(
+            resolve_scheme_color(&theme, "accent1").as_deref(),
+            Some("4472C4")
+        );
+        assert_eq!(
+            resolve_scheme_color(&theme, "tx1").as_deref(),
+            Some("1A1A1A")
+        ); // tx1→dk1
+        assert_eq!(resolve_scheme_color(&theme, "unknown"), None);
+
+        // 在幻灯里 schemeClr 填充应被解析
+        let slide = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+          <p:sp><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>
+            <a:prstGeom prst="rect"/><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:spPr></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let empty = PhGeom::new();
+        let ctx = SlideCtx {
+            theme: &theme,
+            fallback: &empty,
+        };
+        let shapes = parse_slide(slide, &ctx);
+        assert_eq!(shapes[0].fill.as_deref(), Some("4472C4"));
+    }
+
+    #[test]
+    fn load_theme_parses_clrscheme() {
+        let theme_xml = br#"<a:theme xmlns:a="a"><a:themeElements><a:clrScheme name="Office">
+          <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
+          <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+          <a:accent1><a:srgbClr val="4472C4"/></a:accent1>
+        </a:clrScheme></a:themeElements></a:theme>"#;
+        let pptx = zip_of(&[("ppt/theme/theme1.xml", theme_xml)]);
+        let mut zip = zip::ZipArchive::new(Cursor::new(pptx)).unwrap();
+        let theme = super::load_theme(&mut zip);
+        assert_eq!(theme.get("accent1").map(String::as_str), Some("4472C4"));
+        assert_eq!(theme.get("dk1").map(String::as_str), Some("000000"));
+        assert_eq!(theme.get("lt1").map(String::as_str), Some("FFFFFF"));
+    }
+
+    #[test]
+    fn placeholder_inherits_layout_geometry() {
+        // 版式里 title 占位符带 xfrm;幻灯里同类型占位符**无** xfrm → 应借用版式几何
+        let layout = br#"<p:sldLayout xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="title" idx=""/></p:nvPr></p:nvSpPr>
+            <p:spPr><a:xfrm><a:off x="838200" y="365760"/><a:ext cx="7772400" cy="1000000"/></a:xfrm></p:spPr></p:sp>
+        </p:spTree></p:cSld></p:sldLayout>"#;
+        let slide_str = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:nvPr><p:ph type="title" idx=""/></p:nvPr></p:nvSpPr>
+            <p:spPr/><p:txBody><a:p><a:r><a:t>继承标题</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let slide = slide_str.as_bytes();
+        let pres = br#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldSz cx="9144000" cy="6858000"/>
+          <p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#;
+        let pres_rels = br#"<Relationships xmlns="x"><Relationship Id="rId1" Type="t" Target="slides/slide1.xml"/></Relationships>"#;
+        let slide_rels = br#"<Relationships xmlns="x"><Relationship Id="rId9" Type="slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>"#;
+        let pptx = zip_of(&[
+            ("ppt/presentation.xml", pres),
+            ("ppt/_rels/presentation.xml.rels", pres_rels),
+            ("ppt/slides/slide1.xml", slide),
+            ("ppt/slides/_rels/slide1.xml.rels", slide_rels),
+            ("ppt/slideLayouts/slideLayout1.xml", layout),
+        ]);
+        let parsed = parse(&pptx).expect("解析");
+        let sp = &parsed.presentation.slides[0].shapes[0];
+        // 借到版式的位置/尺寸(838200 EMU = 88px)
+        assert!((sp.x - 88.0).abs() < 1.0, "x={}", sp.x);
+        assert!((sp.width - 816.0).abs() < 1.0, "w={}", sp.width);
     }
 }
 

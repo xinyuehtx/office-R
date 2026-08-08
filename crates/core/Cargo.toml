@@ -10,10 +10,16 @@ repository.workspace = true
 calamine = "0.36.1"
 chardetng = "1.0.0"
 csv = "1.4.0"
-docx-rs = "0.4.22"
+docx-rs = { version = "0.4.22", default-features = false }
 encoding_rs = "0.8.35"
 quick-xml = "0.41.0"
 serde = { workspace = true }
 serde_json = "1.0"
 thiserror = "2.0.19"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+
+# docx-rs 的 `image` 特性(位图解码 + 预览生成)只在**测试夹具生成**里用到
+# (`Pic::new`)。放 dev-dependencies:`cargo test` 时按特性统一规则启用,
+# 而 `cargo build` / wasm-pack 构建(不含 dev-deps)不启用 → 给 WASM 瘦身。
+[dev-dependencies]
+docx-rs = { version = "0.4.22", features = ["image"] }

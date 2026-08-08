@@ -33,6 +33,8 @@ export type Inline = Run | ImageRef | BreakInline;
 export interface ListItem {
   level: number;
   ordered: boolean;
+  /** 有序列表序号(从 1 起);无序为 null。 */
+  number: number | null;
 }
 
 export interface Paragraph {

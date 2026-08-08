@@ -59,15 +59,24 @@
 
 ## 取舍与非目标
 
-- Word:列表有序/无序判定未查 numbering.xml(默认项目符号);justify≈左;不含分栏/页眉页脚/修订。
-- PPT:不做母版/版式继承(占位符无显式 xfrm 则跳过)、主题 schemeClr、动画/切换、SmartArt/图表、组合子坐标、旋转。
-- Excel numfmt:不含颜色码 `[Red]`、条件 `[>=100]`、分数。
-- e2e:用「Rust 构造 office 文件夹具 + 浏览器 Playwright 实测」验证在线渲染;
-  自动化浏览器 e2e 测试框架(@playwright/test)留作后续。
+**后续增强(已在 polish 阶段补齐,见 [报告-0007](../reports/0007-office-readonly-polish.md)):**
+
+- ✅ Word 列表**有序/无序**:查 `numbering.xml`(numId→abstractNum→level.format),`decimal`/`lowerRoman`/… 为有序并算序号,`bullet`/`none` 为无序。
+- ✅ Word **两端对齐**(justify):非末行按词间空白拉伸,末行左对齐。
+- ✅ PPT **母版/版式继承**:占位符无 xfrm 时向 slideLayout→slideMaster 借几何。
+- ✅ PPT **主题配色** `schemeClr`:解析 `theme1.xml` 的 `clrScheme`(tx1/bg1→dk1/lt1)。
+- ✅ **自动化 e2e**:引入 `@playwright/test`,覆盖 word/excel(公式/过滤/冻结)/ppt(渲染/翻页/演示)。
+- ✅ **wasm 瘦身**:`docx-rs` 主依赖 `default-features=false`(image 特性移到 dev-dependency),WASM 1807KB → 1114KB(−38%)。
+
+**仍非目标(本期不做):**
+
+- Word:分栏、页眉页脚、修订/批注、精确行距缩进。
+- PPT:动画/切换、SmartArt/图表、组合形状子坐标、旋转翻转、自定义几何、文本默认样式继承。
+- Excel numfmt:颜色码 `[Red]`、条件 `[>=100]`、分数。
 
 ## 影响
 
-- `crates/core`:新增 `numfmt`/`docx`/`pptx`/`filter`;`docx-rs` 默认特性保留(未来可 `default-features=false` 瘦身 wasm)。
+- `crates/core`:新增 `numfmt`/`docx`/`pptx`/`filter`;`docx-rs` 主依赖 `default-features=false`,image 特性移至 dev-dependency(仅测试夹具用)。
 - `crates/wasm`:新增 `word`/`ppt` 绑定。
-- `web`:Word/PPT 页从占位改为真实渲染;Excel 增冻结 UI;新增共享测量缓存。
+- `web`:Word/PPT 页从占位改为真实渲染;Excel 增冻结 UI;新增共享测量缓存;新增 `e2e/`(Playwright)。
 - 文档:architecture / AGENTS / README 同步。

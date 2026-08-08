@@ -35,6 +35,8 @@
 缩略图导航 + **全屏演示模式**(方向键/Esc)。解析(zip + quick-xml 直接解析 OOXML)在 Rust/WASM。
 
 三个应用共用一套**文本测量缓存**(参考 pretext:canvas measureText + 分级缓存 + 字体加载失效)。
+Word 列表区分**有序/无序**(查 numbering.xml)并支持**两端对齐**;PPT 占位符**继承版式/母版几何**、
+解析**主题配色**;并有 **Playwright 浏览器 e2e**(`pnpm -C web e2e`)覆盖三应用在线渲染。
 
 ## 快速开始
 
