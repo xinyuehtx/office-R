@@ -88,16 +88,21 @@ impl PackedCsv {
     /// 因此可安全跨边界传递。
     #[wasm_bindgen(getter)]
     pub fn formulas(&self) -> Result<JsValue, JsValue> {
-        let array = js_sys::Array::new();
-        for f in &self.formulas {
-            let obj = js_sys::Object::new();
-            js_sys::Reflect::set(&obj, &"row".into(), &JsValue::from_f64(f.row as f64))?;
-            js_sys::Reflect::set(&obj, &"col".into(), &JsValue::from_f64(f.col as f64))?;
-            js_sys::Reflect::set(&obj, &"formula".into(), &JsValue::from_str(&f.source))?;
-            array.push(&obj);
-        }
-        Ok(array.into())
+        formulas_to_js(&self.formulas)
     }
+}
+
+/// 公式清单 → JS 数组 `[{row, col, formula}, ...]`。CSV 与 xlsx 共用。
+fn formulas_to_js(formulas: &[office_core::formula::CellFormula]) -> Result<JsValue, JsValue> {
+    let array = js_sys::Array::new();
+    for f in formulas {
+        let obj = js_sys::Object::new();
+        js_sys::Reflect::set(&obj, &"row".into(), &JsValue::from_f64(f.row as f64))?;
+        js_sys::Reflect::set(&obj, &"col".into(), &JsValue::from_f64(f.col as f64))?;
+        js_sys::Reflect::set(&obj, &"formula".into(), &JsValue::from_str(&f.source))?;
+        array.push(&obj);
+    }
+    Ok(array.into())
 }
 
 /// 一块可见区域的单元格文本。
@@ -150,6 +155,16 @@ pub struct WasmSheet {
     /// 关键点:可视行始终是连续的 `0..len`,渲染器的几何(等高行、列前缀和)因此
     /// **完全复用**,过滤对渲染器透明 —— 只是行头标签要显示底层行号(见 `rowLabel`)。
     row_map: Option<Vec<u32>>,
+}
+
+impl WasmSheet {
+    /// 从已构建的 [`Sheet`] 直接封装(xlsx 路径用;不跨 Worker,无需 packed）。
+    pub(crate) fn from_sheet(sheet: Sheet) -> WasmSheet {
+        WasmSheet {
+            sheet,
+            row_map: None,
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -416,6 +431,53 @@ pub fn parse_csv_packed(
         parse_ms,
         formulas,
     })
+}
+
+/// 一个 xlsx **工作簿**句柄:持有多张工作表,按需取出为 [`WasmSheet`]。
+///
+/// xlsx 自带缓存计算值,故不重算;显示表取 calamine 给的值,公式原文单独回传。
+#[wasm_bindgen]
+pub struct WasmWorkbook {
+    sheets: Vec<office_core::xlsx::XlsxSheet>,
+}
+
+#[wasm_bindgen]
+impl WasmWorkbook {
+    /// 解析 xlsx 字节为工作簿句柄。
+    pub fn parse(bytes: &[u8]) -> Result<WasmWorkbook, JsValue> {
+        let wb = office_core::xlsx::parse(bytes).map_err(|e| JsValue::from_str(&e))?;
+        Ok(WasmWorkbook { sheets: wb.sheets })
+    }
+
+    /// 工作表数量。
+    #[wasm_bindgen(js_name = sheetCount)]
+    pub fn sheet_count(&self) -> usize {
+        self.sheets.len()
+    }
+
+    /// 各工作表名(按原始顺序)。
+    #[wasm_bindgen(js_name = sheetNames)]
+    pub fn sheet_names(&self) -> Vec<String> {
+        self.sheets.iter().map(|s| s.name.clone()).collect()
+    }
+
+    /// 取第 `i` 张工作表为可同步取数的表格句柄(克隆其只读表)。
+    pub fn sheet(&self, i: usize) -> Result<WasmSheet, JsValue> {
+        let s = self
+            .sheets
+            .get(i)
+            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
+        Ok(WasmSheet::from_sheet(s.sheet.clone()))
+    }
+
+    /// 第 `i` 张工作表的公式清单 `[{row, col, formula}, ...]`。
+    pub fn formulas(&self, i: usize) -> Result<JsValue, JsValue> {
+        let s = self
+            .sheets
+            .get(i)
+            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
+        formulas_to_js(&s.formulas)
+    }
 }
 
 /// 把元信息序列化成 JS 对象(字段名用 camelCase,贴合前端习惯)。

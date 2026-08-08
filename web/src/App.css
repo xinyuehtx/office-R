@@ -607,6 +607,33 @@
   border: 1px solid #b6e3ff;
 }
 
+/* xlsx 工作表标签栏 */
+.sheet-tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 6px 0;
+  border-bottom: 1px solid #d0d7de;
+}
+
+.sheet-tab {
+  padding: 4px 12px;
+  border: 1px solid #d0d7de;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: #f6f8fa;
+  color: #57606a;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.sheet-tab--active {
+  background: #fff;
+  color: #1f2328;
+  font-weight: 600;
+  border-color: #0969da;
+}
+
 /* 演示模式:铺满视口 */
 .ppt-layout--present {
   position: fixed;

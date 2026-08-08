@@ -8,6 +8,7 @@ import init, {
   setLogLevel as wasmSetLogLevel,
   parseCsvPacked,
   WasmSheet,
+  WasmWorkbook,
   WasmWordDoc,
   WasmPresentation,
 } from "./pkg/office_wasm.js";
@@ -141,10 +142,19 @@ export async function sheetFromPacked(packed: PackedSheetTransfer): Promise<Shee
     packed.cols,
     packed.colWidthUnits,
   );
+  return buildSheetHandle(inner, packed.formulas);
+}
 
+/**
+ * 把一个 `WasmSheet` + 公式清单封装成渲染管线依赖的 `SheetHandle`。
+ *
+ * CSV(`sheetFromPacked`)与 xlsx(`loadXlsx`)共用:两者的差异只在如何得到
+ * `WasmSheet`,取窗口 / 过滤 / 公式回显的行为完全一致。
+ */
+function buildSheetHandle(inner: WasmSheet, formulas: CellFormula[]): SheetHandle {
   // 公式清单转成 Map,按 "row,col" 键 O(1) 查询,供公式栏回显
   const formulaMap = new Map<string, string>();
-  for (const f of packed.formulas) {
+  for (const f of formulas) {
     formulaMap.set(`${f.row},${f.col}`, f.formula);
   }
 
@@ -187,6 +197,38 @@ export async function sheetFromPacked(packed: PackedSheetTransfer): Promise<Shee
     },
     dispose() {
       inner.free();
+    },
+  };
+}
+
+/** 一个已打开的 xlsx 工作簿:工作表名 + 按需取某表的句柄。 */
+export interface XlsxWorkbookHandle {
+  /** 各工作表名(按原始顺序)。 */
+  sheetNames: string[];
+  /** 取第 `i` 张工作表为可绘制句柄;调用方用完 `dispose()`。 */
+  openSheet(index: number): SheetHandle;
+  /** 释放工作簿(其下已取出的表句柄需各自 dispose)。 */
+  dispose(): void;
+}
+
+/**
+ * 解析 xlsx 字节为工作簿句柄(多工作表)。
+ *
+ * xlsx 自带缓存计算值,内核不重算;每张表按需取出为 `SheetHandle`,与 CSV 走同一渲染管线。
+ */
+export async function loadXlsx(bytes: Uint8Array): Promise<XlsxWorkbookHandle> {
+  await ensureReady();
+  const wb = WasmWorkbook.parse(bytes);
+  const sheetNames = wb.sheetNames() as string[];
+  return {
+    sheetNames,
+    openSheet(index: number): SheetHandle {
+      const inner = wb.sheet(index);
+      const formulas = wb.formulas(index) as CellFormula[];
+      return buildSheetHandle(inner, formulas);
+    },
+    dispose() {
+      wb.free();
     },
   };
 }

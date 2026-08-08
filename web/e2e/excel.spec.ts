@@ -41,4 +41,26 @@ test.describe("Excel 只读:公式 / 过滤 / 冻结", () => {
     await page.getByRole("button", { name: "冻结首行" }).click();
     await expect(page.getByTestId("freeze-state")).toContainText("1 行");
   });
+
+  test("xlsx:多工作表 + 公式缓存值 + 切换标签", async ({ page }) => {
+    await gotoTab(page, "表格");
+    await upload(page, "sample.xlsx");
+    const canvas = page.getByTestId("sheet-canvas");
+    await expect(canvas).toBeVisible();
+    // 两张工作表的标签
+    await expect(page.getByTestId("sheet-tabs")).toBeVisible();
+    await expect(page.getByTestId("sheet-tab-0")).toContainText("数据");
+    await expect(page.getByTestId("sheet-tab-1")).toContainText("第二表");
+    // D2 = B2*C2,缓存值 14;公式栏回显 =B2*C2
+    await canvas.click();
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("status")).toContainText("D2:14");
+    await expect(page.getByTestId("formula-bar")).toContainText("=B2*C2");
+    // 切到第二张表
+    await page.getByTestId("sheet-tab-1").click();
+    await expect(canvas).toBeVisible();
+  });
 });

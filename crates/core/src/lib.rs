@@ -30,6 +30,7 @@ pub mod pptx;
 pub mod render;
 pub mod sheet;
 pub mod word;
+pub mod xlsx;
 
 pub use csv::{CsvDocument, CsvError, CsvMeta, CsvOptions};
 pub use filter::{filter_rows, ColumnFilter, NumOp, Predicate, TextOp};

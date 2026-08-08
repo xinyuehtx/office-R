@@ -1,9 +1,12 @@
+import { useState } from "react";
 import { FileUpload } from "../shared/FileUpload";
 import { useCsvFile } from "../shared/useCsvFile";
+import { useXlsxFile } from "../shared/useXlsxFile";
+import { createTracer } from "../shared/logger";
 import { SheetCanvas } from "./SheetCanvas";
 
-/** 本期支持的扩展名。xlsx 的表格渲染留待后续切片。 */
-const ACCEPT = ".csv,.tsv,.txt";
+/** 支持的扩展名:CSV 家族 + xlsx。 */
+const ACCEPT = ".csv,.tsv,.txt,.xlsx";
 
 /**
  * 内置公式示例:以 `=` 开头的单元格会被 Rust/WASM 公式引擎求值,
@@ -26,35 +29,74 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+type Mode = "csv" | "xlsx";
+
 /**
  * 表格(Excel)页面。
  *
- * 上传 CSV → canvas 表格视图。以 `=` 开头的单元格会被 **Rust/WASM 公式引擎**求值,
- * 显示计算结果(选中后公式栏回显原始公式),语义对齐 Excel。
+ * 支持 CSV 与 **.xlsx**:CSV 走 Worker 紧凑缓冲解析,xlsx 用 calamine 一次解析成
+ * 多张工作表(自带缓存计算值,不重算)。两者都在 canvas 上渲染,共用同一套渲染管线;
+ * 以 `=` 开头的单元格显示计算结果、公式栏回显原始公式,语义对齐 Excel。
  */
 export function ExcelPage() {
-  const { state, openFile, reset } = useCsvFile();
-  const busy = state.status === "reading" || state.status === "parsing";
+  const csv = useCsvFile();
+  const xlsx = useXlsxFile();
+  const [mode, setMode] = useState<Mode | null>(null);
 
-  /** 载入内置公式示例(构造成一个 File 走同一条打开流程)。 */
-  const openSample = () => {
-    const file = new File([FORMULA_SAMPLE], "公式示例.csv", { type: "text/csv" });
-    void openFile(file);
+  /** 按扩展名路由到 CSV 或 xlsx 打开流程。 */
+  const handleFile = (file: File) => {
+    if (file.name.toLowerCase().endsWith(".xlsx")) {
+      setMode("xlsx");
+      csv.reset();
+      void xlsx.openFile(file);
+    } else {
+      setMode("csv");
+      xlsx.reset();
+      void csv.openFile(file);
+    }
   };
+
+  /** 载入内置公式示例(构造成一个 CSV File 走同一条打开流程)。 */
+  const openSample = () => {
+    handleFile(new File([FORMULA_SAMPLE], "公式示例.csv", { type: "text/csv" }));
+  };
+
+  const closeAll = () => {
+    csv.reset();
+    xlsx.reset();
+    setMode(null);
+  };
+
+  const csvState = csv.state;
+  const xlsxState = xlsx.state;
+  const busy =
+    (mode === "csv" && (csvState.status === "reading" || csvState.status === "parsing")) ||
+    (mode === "xlsx" && (xlsxState.status === "reading" || xlsxState.status === "parsing"));
+  const errorState =
+    mode === "csv" && csvState.status === "error"
+      ? csvState.error
+      : mode === "xlsx" && xlsxState.status === "error"
+        ? xlsxState.error
+        : null;
+  const fileName = mode === "xlsx" ? xlsxState.fileName : csvState.fileName;
+  const fileSize = mode === "xlsx" ? xlsxState.fileSize : csvState.fileSize;
+  const ready =
+    (mode === "csv" && csvState.status === "ready") ||
+    (mode === "xlsx" && xlsxState.status === "ready");
 
   return (
     <section className="office-page office-page--sheet" aria-label="表格 · Excel">
       <header className="office-page__header">
         <h2>表格 · Excel</h2>
         <p className="office-page__subtitle">
-          上传 CSV 文件,在 canvas 上查看表格视图。解析、列切分与**公式求值**都由
-          Rust/WASM 内核完成,支持自动识别编码与分隔符。写在单元格里以 <code>=</code>{" "}
-          开头的公式(如 <code>=SUM(A1:A10)</code>)会像 Excel 一样算出结果。
+          上传 CSV 或 <code>.xlsx</code> 文件,在 canvas 上查看表格视图。解析、列切分与
+          <strong>公式求值</strong>都由 Rust/WASM 内核完成。xlsx 支持
+          <strong>多工作表切换</strong>,单元格显示计算值、公式栏回显原始公式。
         </p>
       </header>
 
       <div className="office-page__upload">
-        <FileUpload accept={ACCEPT} onFile={openFile} label="上传 CSV 文件" />
+        <FileUpload accept={ACCEPT} onFile={handleFile} label="上传 CSV / xlsx 文件" />
         <button
           type="button"
           className="office-page__link"
@@ -63,14 +105,14 @@ export function ExcelPage() {
         >
           加载公式示例
         </button>
-        {state.fileName && (
+        {fileName && (
           <span className="office-page__filename">
-            {state.fileName}
-            <span className="office-page__filesize">{formatBytes(state.fileSize)}</span>
+            {fileName}
+            <span className="office-page__filesize">{formatBytes(fileSize)}</span>
           </span>
         )}
-        {state.status === "ready" && (
-          <button type="button" className="office-page__link" onClick={reset}>
+        {ready && (
+          <button type="button" className="office-page__link" onClick={closeAll}>
             关闭
           </button>
         )}
@@ -78,28 +120,28 @@ export function ExcelPage() {
 
       {busy && (
         <div className="office-page__result" data-testid="result">
-          <p>{state.status === "reading" ? "正在读取文件…" : "正在解析…"}</p>
+          <p>正在解析…</p>
         </div>
       )}
 
-      {state.status === "error" && (
+      {errorState && (
         <div className="office-page__result" data-testid="result">
-          <p className="office-page__error">打开失败:{state.error}</p>
+          <p className="office-page__error">打开失败:{errorState}</p>
           <p className="office-page__hint">
-            请确认这是一个 CSV 文本文件,然后重新选择文件重试。
-            {state.traceId && <>(排查编号 {state.traceId})</>}
+            请确认文件格式正确,然后重新选择文件重试。
+            {mode === "csv" && csvState.traceId && <>(排查编号 {csvState.traceId})</>}
           </p>
         </div>
       )}
 
-      {state.status === "idle" && (
+      {mode === null && (
         <div className="office-page__result" data-testid="result">
           <p className="office-page__empty">
-            尚未选择文件。请上传一个 CSV 文件以查看表格视图。
+            尚未选择文件。请上传一个 CSV 或 .xlsx 文件以查看表格视图。
           </p>
           <ul className="office-page__hint">
-            <li>支持 UTF-8 / UTF-16 / GBK 等编码,带不带 BOM 都可以。</li>
-            <li>分隔符自动识别:逗号、分号、制表符、竖线。</li>
+            <li>CSV:支持 UTF-8 / UTF-16 / GBK 等编码,分隔符自动识别。</li>
+            <li>xlsx:多工作表,单元格显示计算值(公式引擎不重算,直接用缓存结果)。</li>
             <li>
               以 <code>=</code> 开头的单元格按 Excel 公式求值,支持 SUM/IF/VLOOKUP/DATE 等
               140+ 函数。点「加载公式示例」试试。
@@ -109,53 +151,78 @@ export function ExcelPage() {
         </div>
       )}
 
-      {state.status === "ready" && state.sheet && state.meta && state.tracer && (
+      {/* CSV 视图 */}
+      {mode === "csv" && csvState.status === "ready" && csvState.sheet && csvState.meta && csvState.tracer && (
         <>
-          <SheetCanvas sheet={state.sheet} tracer={state.tracer} />
+          <SheetCanvas sheet={csvState.sheet} tracer={csvState.tracer} />
           <dl className="office-page__meta" data-testid="sheet-meta">
             <dt>编码</dt>
             <dd>
-              {state.meta.encoding}
-              {state.meta.lossy && <span className="office-page__warn">(部分字符无法解码)</span>}
+              {csvState.meta.encoding}
+              {csvState.meta.lossy && <span className="office-page__warn">(部分字符无法解码)</span>}
             </dd>
             <dt>分隔符</dt>
+            <dd>{csvState.meta.delimiter === "\t" ? "制表符" : csvState.meta.delimiter}</dd>
+            <dt>规模</dt>
             <dd>
-              {state.meta.delimiter === "\t" ? "制表符" : state.meta.delimiter}
+              {csvState.meta.rows.toLocaleString()} 行 × {csvState.meta.cols.toLocaleString()} 列
+              {(csvState.meta.truncatedRows || csvState.meta.truncatedCols) && (
+                <span className="office-page__warn">已达上限,超出部分未显示</span>
+              )}
+            </dd>
+            {csvState.sheet.formulaCount ? (
+              <>
+                <dt>公式</dt>
+                <dd>{csvState.sheet.formulaCount.toLocaleString()} 个已求值</dd>
+              </>
+            ) : null}
+          </dl>
+        </>
+      )}
+
+      {/* xlsx 视图:工作表标签 + 表格 */}
+      {mode === "xlsx" && xlsxState.status === "ready" && xlsxState.sheet && (
+        <>
+          {xlsxState.sheetNames.length > 1 && (
+            <div className="sheet-tabs" role="tablist" data-testid="sheet-tabs">
+              {xlsxState.sheetNames.map((name, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  role="tab"
+                  aria-selected={i === xlsxState.activeSheet}
+                  className={i === xlsxState.activeSheet ? "sheet-tab sheet-tab--active" : "sheet-tab"}
+                  onClick={() => xlsx.selectSheet(i)}
+                  data-testid={`sheet-tab-${i}`}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          )}
+          <SheetCanvas
+            key={xlsxState.activeSheet}
+            sheet={xlsxState.sheet}
+            tracer={xlsxState.tracer ?? createTracer()}
+          />
+          <dl className="office-page__meta" data-testid="sheet-meta">
+            <dt>工作表</dt>
+            <dd>
+              {xlsxState.sheetNames[xlsxState.activeSheet]}
               <span className="office-page__muted">
-                {state.meta.delimiterSource === "sniffed"
-                  ? "自动识别"
-                  : state.meta.delimiterSource === "explicit"
-                    ? "手动指定"
-                    : "默认值"}
+                第 {xlsxState.activeSheet + 1} / {xlsxState.sheetNames.length} 张
               </span>
             </dd>
             <dt>规模</dt>
             <dd>
-              {state.meta.rows.toLocaleString()} 行 × {state.meta.cols.toLocaleString()} 列
-              {(state.meta.truncatedRows || state.meta.truncatedCols) && (
-                <span className="office-page__warn">已达上限,超出部分未显示</span>
-              )}
+              {xlsxState.sheet.rows.toLocaleString()} 行 × {xlsxState.sheet.cols.toLocaleString()} 列
             </dd>
-            {state.sheet.formulaCount ? (
+            {xlsxState.sheet.formulaCount ? (
               <>
                 <dt>公式</dt>
-                <dd>
-                  {state.sheet.formulaCount.toLocaleString()} 个已求值
-                  <span className="office-page__muted">选中公式格,公式栏显示原始公式</span>
-                </dd>
+                <dd>{xlsxState.sheet.formulaCount.toLocaleString()} 个(显示缓存计算值)</dd>
               </>
             ) : null}
-            {state.metrics && (
-              <>
-                <dt>耗时</dt>
-                <dd className="office-page__muted">
-                  读取 {state.metrics.readMs.toFixed(0)} ms · 解析{" "}
-                  {state.metrics.kernelMs.toFixed(0)} ms · 合计{" "}
-                  {state.metrics.totalMs.toFixed(0)} ms
-                  {state.metrics.offMainThread ? "(后台线程解析)" : "(主线程解析)"}
-                </dd>
-              </>
-            )}
           </dl>
         </>
       )}
