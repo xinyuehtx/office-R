@@ -220,4 +220,29 @@ describe("wordLayout · 页眉页脚 + 分栏 + 修订", () => {
     expect(del?.color).toBe("#cf222e");
     expect(del?.strike).toBe(true);
   });
+
+  it("超链接:蓝色 + 下划线", () => {
+    const link: Run = { ...run("官网"), link: "https://example.com/" };
+    const layout = layoutDoc({ blocks: [para([link])] }, 820, measurer);
+    // CJK 逐字成段:取任一非空文本段验证其链接样式
+    const seg = layout.items
+      .flatMap((i) => (i.kind === "textline" ? i.segments : []))
+      .find((s) => s.text.trim().length > 0);
+    expect(seg?.color).toBe("#0969da");
+    expect(seg?.underline).toBe(true);
+  });
+
+  it("脚注:渲染在正文末尾(带分隔线)", () => {
+    const layout = layoutDoc(
+      { blocks: [para([run("正文")])], footnotes: [para([run("1. 一条脚注")])] },
+      820,
+      measurer,
+    );
+    const lineTexts = layout.items
+      .filter((i) => i.kind === "textline")
+      .map((i) => (i.kind === "textline" ? i.segments.map((s) => s.text).join("") : ""));
+    expect(lineTexts.some((t) => t.includes("一条脚注"))).toBe(true);
+    // 脚注分隔线为 height=0 的 rect
+    expect(layout.items.some((i) => i.kind === "rect" && i.height === 0)).toBe(true);
+  });
 });

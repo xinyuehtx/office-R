@@ -20,6 +20,8 @@ export interface Run {
   color: string | null;
   /** 修订标记(缺省 none)。 */
   revision?: Revision;
+  /** 超链接目标(外部 URL 或 #锚点);非链接为 null/缺省。 */
+  link?: string | null;
 }
 
 export interface ImageRef {
@@ -71,6 +73,8 @@ export interface WordModel {
   header?: Block[];
   /** 页脚块。 */
   footer?: Block[];
+  /** 脚注块(渲染在正文末尾)。 */
+  footnotes?: Block[];
 }
 
 /** 图片资源:id → object URL(由字节 + mime 构造)。 */

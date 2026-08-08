@@ -13,8 +13,9 @@
 //! 主题配色 `schemeClr`(解析 `ppt/theme/theme1.xml` 的 `clrScheme`,含 tx1/bg1→dk1/lt1 默认映射)、
 //! 旋转/翻转(`a:xfrm@rot/@flipH/@flipV`)、文本默认样式继承(母版 `p:txStyles`)、
 //! 动画/切换标记(`p:timing`/`p:transition` → `has_animation`/`has_transition`)、
-//! 图表/SmartArt 占位(`p:graphicFrame` → `placeholder_kind`,仅占位框 + 类型标签)。
-//! **非目标**:动画/切换的具体时间线回放、图表/SmartArt 的真实绘制、组合形状子坐标、自定义几何。
+//! 图表/SmartArt 占位(`p:graphicFrame` → `placeholder_kind`,仅占位框 + 类型标签)、
+//! 组合形状 `p:grpSp`(按 `chOff`/`chExt`→`off`/`ext` 映射子坐标,支持嵌套)。
+//! **非目标**:动画/切换的具体时间线回放、图表/SmartArt 的真实绘制、自定义几何。
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -440,6 +441,45 @@ struct SlideCtx<'a> {
     text_defaults: &'a TextDefaults,
 }
 
+/// 组合形状 `p:grpSp` 的坐标变换:把**子坐标系**里的形状映射到父(幻灯)坐标系。
+///
+/// 组的 `a:xfrm` 同时给出组在父系里的位置/尺寸(`off`/`ext`)与子坐标系的原点/范围
+/// (`chOff`/`chExt`)。子形状 `(x,y,w,h)` 映射:
+/// `sx = ext/chExt`,`X = off + (x - chOff) * sx`,`W = w * sx`(y 同理)。
+/// 嵌套组由内到外依次套用。
+#[derive(Default, Clone)]
+struct GroupXform {
+    off_x: f64,
+    off_y: f64,
+    ext_cx: f64,
+    ext_cy: f64,
+    ch_off_x: f64,
+    ch_off_y: f64,
+    ch_ext_cx: f64,
+    ch_ext_cy: f64,
+}
+
+impl GroupXform {
+    fn map(&self, x: f64, y: f64, w: f64, h: f64) -> (f64, f64, f64, f64) {
+        let sx = if self.ch_ext_cx != 0.0 {
+            self.ext_cx / self.ch_ext_cx
+        } else {
+            1.0
+        };
+        let sy = if self.ch_ext_cy != 0.0 {
+            self.ext_cy / self.ch_ext_cy
+        } else {
+            1.0
+        };
+        (
+            self.off_x + (x - self.ch_off_x) * sx,
+            self.off_y + (y - self.ch_off_y) * sy,
+            w * sx,
+            h * sy,
+        )
+    }
+}
+
 /// 解析单张幻灯的形状树。用元素名栈跟踪上下文(区分 spPr 填充 vs rPr 颜色等)。
 ///
 /// `ctx` 提供主题配色(解析 `schemeClr`)与占位符几何回退(占位符 sp 无 xfrm 时借用版式/母版)。
@@ -455,6 +495,8 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
     // graphicFrame:内嵌 chart/diagram/table,当作一个「内容占位」形状
     let mut has_animation = false;
     let mut has_transition = false;
+    // 组合形状变换栈(外→内);子形状落盘时由内到外套用映射到幻灯坐标
+    let mut groups: Vec<GroupXform> = Vec::new();
 
     while let Ok(ev) = reader.read_event_into(&mut buf) {
         match ev {
@@ -465,6 +507,8 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
                     // 动画 / 切换:只标记存在
                     "timing" => has_animation = true,
                     "transition" => has_transition = true,
+                    // 组合形状:压一层变换(其 xfrm 的 off/ext/chOff/chExt 随后填入)
+                    "grpSp" => groups.push(GroupXform::default()),
                     // graphicFrame 起始:作为一个内容占位形状
                     "graphicFrame" => cur = Some(ShapeBuilder::default()),
                     _ => {}
@@ -492,32 +536,37 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
                         b.placeholder_kind = graphic_kind(&attr(&e, "uri").unwrap_or_default());
                     }
                 }
-                handle_start(
-                    &e,
-                    &name,
-                    &stack,
-                    ctx.theme,
-                    &mut cur,
-                    &mut cur_para,
-                    &mut cur_run,
-                );
+                // 组 xfrm 的 off/ext/chOff/chExt:无活动形状(cur=None)且在组内时,填入当前组
+                let group_ctx = cur.is_none() && !groups.is_empty();
+                if group_ctx && matches!(name.as_str(), "off" | "ext" | "chOff" | "chExt") {
+                    if let Some(g) = groups.last_mut() {
+                        fill_group_xform(g, &name, &e);
+                    }
+                } else {
+                    handle_start(
+                        &e,
+                        &name,
+                        &stack,
+                        ctx.theme,
+                        &mut cur,
+                        &mut cur_para,
+                        &mut cur_run,
+                    );
+                }
             }
             Event::End(_e) => {
                 let name = stack.pop().unwrap_or_default();
-                if name == "graphicFrame" {
-                    // 收尾 graphicFrame 形状(与 sp/pic 相同的落盘路径)
-                    handle_end(
-                        "sp",
-                        ctx.fallback,
-                        ctx.text_defaults,
-                        &mut shapes,
-                        &mut cur,
-                        &mut cur_para,
-                        &mut cur_run,
-                    );
+                if name == "grpSp" {
+                    groups.pop();
                 } else {
+                    let end_name = if name == "graphicFrame" {
+                        "sp"
+                    } else {
+                        name.as_str()
+                    };
+                    let before = shapes.len();
                     handle_end(
-                        &name,
+                        end_name,
                         ctx.fallback,
                         ctx.text_defaults,
                         &mut shapes,
@@ -525,6 +574,23 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
                         &mut cur_para,
                         &mut cur_run,
                     );
+                    // 新落盘的形状若在组内,按组变换映射到幻灯坐标(由内到外)
+                    if shapes.len() > before && !groups.is_empty() {
+                        if let Some(s) = shapes.last_mut() {
+                            let (mut x, mut y, mut w, mut h) = (s.x, s.y, s.width, s.height);
+                            for g in groups.iter().rev() {
+                                let m = g.map(x, y, w, h);
+                                x = m.0;
+                                y = m.1;
+                                w = m.2;
+                                h = m.3;
+                            }
+                            s.x = x;
+                            s.y = y;
+                            s.width = w;
+                            s.height = h;
+                        }
+                    }
                 }
             }
             Event::Text(t) => {
@@ -546,6 +612,49 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
         shapes,
         has_animation,
         has_transition,
+    }
+}
+
+/// 把组 `a:xfrm` 的 `off`/`ext`/`chOff`/`chExt`(EMU→px)填入组变换。
+fn fill_group_xform(g: &mut GroupXform, name: &str, e: &BytesStart) {
+    let x = attr(e, "x").and_then(|s| s.parse::<f64>().ok());
+    let y = attr(e, "y").and_then(|s| s.parse::<f64>().ok());
+    let cx = attr(e, "cx").and_then(|s| s.parse::<f64>().ok());
+    let cy = attr(e, "cy").and_then(|s| s.parse::<f64>().ok());
+    match name {
+        "off" => {
+            if let Some(x) = x {
+                g.off_x = emu(x);
+            }
+            if let Some(y) = y {
+                g.off_y = emu(y);
+            }
+        }
+        "ext" => {
+            if let Some(cx) = cx {
+                g.ext_cx = emu(cx);
+            }
+            if let Some(cy) = cy {
+                g.ext_cy = emu(cy);
+            }
+        }
+        "chOff" => {
+            if let Some(x) = x {
+                g.ch_off_x = emu(x);
+            }
+            if let Some(y) = y {
+                g.ch_off_y = emu(y);
+            }
+        }
+        "chExt" => {
+            if let Some(cx) = cx {
+                g.ch_ext_cx = emu(cx);
+            }
+            if let Some(cy) = cy {
+                g.ch_ext_cy = emu(cy);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1351,6 +1460,35 @@ mod tests {
         let parsed = parse_slide(slide, &ctx);
         assert!(parsed.has_animation);
         assert!(parsed.has_transition);
+    }
+
+    #[test]
+    fn group_shape_maps_child_coordinates() {
+        // 组:父系 off=(0,0) ext=(9144000,4572000);子系 chOff=(0,0) chExt=(4572000,2286000)
+        // → 缩放 sx=sy=2。子矩形 off=(1000000,500000) ext=(1000000,500000)
+        // → 映射后 x=2000000→px, w=2000000→px。
+        let slide = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+          <p:grpSp><p:grpSpPr><a:xfrm>
+            <a:off x="0" y="0"/><a:ext cx="9144000" cy="4572000"/>
+            <a:chOff x="0" y="0"/><a:chExt cx="4572000" cy="2286000"/>
+          </a:xfrm></p:grpSpPr>
+          <p:sp><p:spPr><a:xfrm><a:off x="1000000" y="500000"/><a:ext cx="1000000" cy="500000"/></a:xfrm>
+            <a:prstGeom prst="rect"/></p:spPr></p:sp>
+          </p:grpSp>
+        </p:spTree></p:cSld></p:sld>"#;
+        let (theme, fallback, defaults) = empty_ctx();
+        let ctx = SlideCtx {
+            theme: &theme,
+            fallback: &fallback,
+            text_defaults: &defaults,
+        };
+        let shapes = parse_slide(slide, &ctx).shapes;
+        assert_eq!(shapes.len(), 1);
+        let s = &shapes[0];
+        // 子 x=1000000 EMU;映射 X = 0 + (1000000-0)*2 = 2000000 EMU → px
+        assert!((s.x - emu(2_000_000.0)).abs() < 0.5, "x={}", s.x);
+        assert!((s.width - emu(2_000_000.0)).abs() < 0.5, "w={}", s.width);
+        assert!((s.y - emu(1_000_000.0)).abs() < 0.5, "y={}", s.y);
     }
 }
 

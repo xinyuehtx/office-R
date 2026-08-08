@@ -8,8 +8,9 @@
 //! **重 CPU 在此**:解析与模型构建放 WASM,视图层只按模型排版绘制。
 //!
 //! 覆盖范围(本期只读):文字、加粗/斜体/下划线、字号/颜色、标题(Heading1-6)、
-//! 段落对齐、项目符号/编号列表、内联图片、表格、图文混排。
-//! **非目标**:分栏、文本框绘图、公式对象、批注、修订、页眉页脚、精确行距/缩进。
+//! 段落对齐、项目符号/编号列表、内联图片、表格、图文混排、分栏、页眉页脚、
+//! 修订(插入/删除)、超链接(蓝色下划线)、脚注(文末汇总 + 引用标记 `[n]`)。
+//! **非目标**:文本框绘图、公式对象、批注、精确行距/缩进。
 
 use serde::Serialize;
 
@@ -70,6 +71,9 @@ pub struct Run {
     /// 修订标记(插入/删除/无)。
     #[serde(default)]
     pub revision: Revision,
+    /// 超链接目标(外部 URL 或 `#锚点`);非链接为 `None`。视图渲染为蓝色下划线。
+    #[serde(default)]
+    pub link: Option<String>,
 }
 
 /// 内联图片引用(字节在 [`ParsedDoc::images`] 里按 `id` 取)。
@@ -147,6 +151,9 @@ pub struct WordDoc {
     /// 页脚段落(来自 footer part);无则空。
     #[serde(default)]
     pub footer: Vec<Block>,
+    /// 脚注(来自 footnotes part);每条一个块,渲染在正文末尾。
+    #[serde(default)]
+    pub footnotes: Vec<Block>,
 }
 
 /// 一张图片的字节(单独于模型,便于按需转移到 JS)。
@@ -178,15 +185,25 @@ struct Ctx {
     ordered: std::collections::HashMap<usize, std::collections::HashMap<usize, bool>>,
     /// 有序列表运行期计数:(numId, level) → 已出现的序号。
     counters: std::collections::HashMap<(usize, usize), u32>,
+    /// 超链接 rId → 目标 URL(来自 document.xml.rels)。
+    hyperlinks: std::collections::HashMap<String, String>,
 }
 
 /// 解析 docx 字节为文档模型。
 pub fn parse(bytes: &[u8]) -> Result<ParsedDoc, String> {
     let docx = docx_rs::read_docx(bytes).map_err(|e| format!("{e:?}"))?;
     let images = collect_images(&docx);
+    // 超链接 rId → 目标 URL(document.xml.rels 里的 hyperlinks:(id, target, type))
+    let hyperlinks = docx
+        .document_rels
+        .hyperlinks
+        .iter()
+        .map(|(id, target, _ty)| (id.clone(), target.clone()))
+        .collect();
     let mut ctx = Ctx {
         ordered: build_numbering_map(&docx),
         counters: std::collections::HashMap::new(),
+        hyperlinks,
     };
     let blocks = docx
         .document
@@ -209,15 +226,86 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedDoc, String> {
         .map(|(_, f)| convert_footer_children(&f.children, &mut ctx))
         .unwrap_or_default();
 
+    // 脚注:docx.footnotes 里每条 footnote 的文本转块,前缀「n.」编号
+    let footnotes = collect_footnotes(&docx);
+
     Ok(ParsedDoc {
         doc: WordDoc {
             blocks,
             columns,
             header,
             footer,
+            footnotes,
         },
         images,
     })
+}
+
+/// 收集脚注为块序列。`Footnotes.footnotes` 字段是 `pub(crate)` 不可直接访问,
+/// 故经 serde 取出 `{ footnotes: [{ id, content }] }`,递归收集各条可见文本
+/// (run 的 `text`),渲染成「n. 文本」段落。跳过 id≤1 的分隔符脚注。
+fn collect_footnotes(docx: &Docx) -> Vec<Block> {
+    let mut out = Vec::new();
+    let value = match serde_json::to_value(&docx.footnotes) {
+        Ok(v) => v,
+        Err(_) => return out,
+    };
+    let Some(list) = value.get("footnotes").and_then(|v| v.as_array()) else {
+        return out;
+    };
+    for fnt in list {
+        let id = fnt.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+        if id <= 1 {
+            continue;
+        }
+        let mut text = String::new();
+        if let Some(content) = fnt.get("content") {
+            gather_text(content, &mut text);
+        }
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        out.push(Block::Paragraph(Paragraph {
+            heading: None,
+            align: Align::Left,
+            list: None,
+            inlines: vec![Inline::Text(Run {
+                text: format!("{id}. {text}"),
+                bold: false,
+                italic: false,
+                underline: false,
+                size_pt: Some(9.0),
+                color: Some("57606a".to_string()),
+                revision: Revision::None,
+                link: None,
+            })],
+        }));
+    }
+    out
+}
+
+/// 递归收集 JSON 里所有 `"text"` 字符串字段(按出现顺序),用于抽取脚注可见文本。
+fn gather_text(v: &serde_json::Value, out: &mut String) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, val) in map {
+                if k == "text" {
+                    if let Some(s) = val.as_str() {
+                        out.push_str(s);
+                    }
+                } else {
+                    gather_text(val, out);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                gather_text(item, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// 把页眉子元素转成块(段落 / 表格)。
@@ -364,19 +452,28 @@ fn convert_paragraph(p: &DxParagraph, ctx: &mut Ctx) -> Paragraph {
     let mut inlines = Vec::new();
     for child in &p.children {
         match child {
-            ParagraphChild::Run(run) => append_run(run, Revision::None, &mut inlines),
+            ParagraphChild::Run(run) => append_run(run, Revision::None, None, ctx, &mut inlines),
             // 修订:插入 / 删除 里的 run 打上标记
             ParagraphChild::Insert(ins) => {
                 for ic in &ins.children {
                     if let docx_rs::InsertChild::Run(run) = ic {
-                        append_run(run, Revision::Inserted, &mut inlines);
+                        append_run(run, Revision::Inserted, None, ctx, &mut inlines);
                     }
                 }
             }
             ParagraphChild::Delete(del) => {
                 for dc in &del.children {
                     if let docx_rs::DeleteChild::Run(run) = dc {
-                        append_run(run, Revision::Deleted, &mut inlines);
+                        append_run(run, Revision::Deleted, None, ctx, &mut inlines);
+                    }
+                }
+            }
+            // 超链接:解析目标(外部 rId → URL;锚点 → #anchor),子 run 打上 link
+            ParagraphChild::Hyperlink(h) => {
+                let target = hyperlink_target(&h.link, ctx);
+                for hc in &h.children {
+                    if let ParagraphChild::Run(run) = hc {
+                        append_run(run, Revision::None, target.as_deref(), ctx, &mut inlines);
                     }
                 }
             }
@@ -392,12 +489,33 @@ fn convert_paragraph(p: &DxParagraph, ctx: &mut Ctx) -> Paragraph {
     }
 }
 
-fn append_run(run: &docx_rs::Run, revision: Revision, out: &mut Vec<Inline>) {
+/// 解析超链接目标:外部链接经 `document_rels` 把 rId 映射为 URL;锚点返回 `#anchor`。
+fn hyperlink_target(link: &docx_rs::HyperlinkData, ctx: &Ctx) -> Option<String> {
+    match link {
+        docx_rs::HyperlinkData::External { rid, path } => {
+            if !path.is_empty() {
+                Some(path.clone())
+            } else {
+                ctx.hyperlinks.get(rid).cloned()
+            }
+        }
+        docx_rs::HyperlinkData::Anchor { anchor } => Some(format!("#{anchor}")),
+    }
+}
+
+fn append_run(
+    run: &docx_rs::Run,
+    revision: Revision,
+    link: Option<&str>,
+    _ctx: &Ctx,
+    out: &mut Vec<Inline>,
+) {
     let rp = &run.run_property;
     let bold = rp.bold.is_some();
     let italic = rp.italic.is_some();
     let underline = rp.underline.is_some();
     let (size_pt, color) = run_size_color(rp);
+    let link = link.map(|s| s.to_string());
     let mk = |text: String| {
         Inline::Text(Run {
             text,
@@ -407,6 +525,7 @@ fn append_run(run: &docx_rs::Run, revision: Revision, out: &mut Vec<Inline>) {
             size_pt,
             color: color.clone(),
             revision,
+            link: link.clone(),
         })
     };
 
@@ -427,10 +546,24 @@ fn append_run(run: &docx_rs::Run, revision: Revision, out: &mut Vec<Inline>) {
                     size_pt,
                     color: color.clone(),
                     revision: Revision::Deleted,
+                    link: link.clone(),
                 }));
             }
             RunChild::Break(_) => out.push(Inline::Break),
             RunChild::Tab(_) => out.push(mk("\t".to_string())),
+            // 脚注引用:插入一个上标式标记 [n](内容渲染在文末脚注区)
+            RunChild::FootnoteReference(f) => {
+                out.push(Inline::Text(Run {
+                    text: format!("[{}]", f.id),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    size_pt: None,
+                    color: Some("0969da".to_string()),
+                    revision,
+                    link: None,
+                }));
+            }
             RunChild::Drawing(d) => {
                 if let Some(img) = drawing_image(d) {
                     out.push(Inline::Image(img));
@@ -687,6 +820,51 @@ mod tests {
         let l2 = paras[2].list.as_ref().expect("列表");
         assert!(!l2.ordered);
         assert_eq!(l2.number, None);
+    }
+
+    #[test]
+    fn resolves_hyperlink_target() {
+        use super::{hyperlink_target, Ctx};
+        use docx_rs::HyperlinkData;
+        let mut hl = std::collections::HashMap::new();
+        hl.insert("rId7".to_string(), "https://example.com/".to_string());
+        let ctx = Ctx {
+            ordered: Default::default(),
+            counters: Default::default(),
+            hyperlinks: hl,
+        };
+        // 外部链接:rId 经 rels 解析为 URL
+        assert_eq!(
+            hyperlink_target(
+                &HyperlinkData::External {
+                    rid: "rId7".into(),
+                    path: String::new()
+                },
+                &ctx
+            ),
+            Some("https://example.com/".to_string())
+        );
+        // 外部链接:path 直给时优先
+        assert_eq!(
+            hyperlink_target(
+                &HyperlinkData::External {
+                    rid: "x".into(),
+                    path: "http://direct/".into()
+                },
+                &ctx
+            ),
+            Some("http://direct/".to_string())
+        );
+        // 锚点
+        assert_eq!(
+            hyperlink_target(
+                &HyperlinkData::Anchor {
+                    anchor: "sec1".into()
+                },
+                &ctx
+            ),
+            Some("#sec1".to_string())
+        );
     }
 
     #[test]

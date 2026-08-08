@@ -78,9 +78,10 @@ function runFont(run: Run, basePx: number, baseBold: boolean): { font: string; p
 }
 
 function runColor(run: Run): string {
-  // 修订用醒目色:插入(蓝)、删除(红);否则用原色 / 默认
+  // 修订用醒目色:插入(蓝)、删除(红);超链接蓝;否则用原色 / 默认
   if (run.revision === "inserted") return "#0969da";
   if (run.revision === "deleted") return "#cf222e";
+  if (run.link) return "#0969da";
   if (run.color && /^[0-9a-fA-F]{6}$/.test(run.color)) return `#${run.color}`;
   return DEFAULT_COLOR;
 }
@@ -243,7 +244,7 @@ function layoutParagraph(
           text: t.text,
           font: t.font,
           color: runColor(t.run),
-          underline: t.run.underline,
+          underline: t.run.underline || !!t.run.link,
           strike: t.run.revision === "deleted",
         });
         cx += t.width;
@@ -381,6 +382,15 @@ export function layoutDoc(model: WordModel, pageWidth: number, measurer: TextMea
     y = layoutBlocks(footer, x0, contentWidth, y, measurer, items);
   }
 
+  // 脚注:一条分隔线 + 各条脚注(渲染在正文末尾)
+  const footnotes = model.footnotes ?? [];
+  if (footnotes.length > 0) {
+    y += HF_GAP;
+    items.push({ kind: "rect", x: x0, y, width: contentWidth / 3, height: 0 });
+    y += HF_GAP;
+    y = layoutBlocks(footnotes, x0, contentWidth, y, measurer, items);
+  }
+
   return { width: pageWidth, height: y + PAGE_PADDING, items };
 }
 
@@ -408,5 +418,6 @@ export function imageIdsIn(model: WordModel): string[] {
   walk(model.blocks);
   walk(model.header ?? []);
   walk(model.footer ?? []);
+  walk(model.footnotes ?? []);
   return [...ids];
 }
