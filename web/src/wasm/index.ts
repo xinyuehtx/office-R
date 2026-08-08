@@ -9,6 +9,7 @@ import init, {
   parseCsvPacked,
   WasmSheet,
   WasmWordDoc,
+  WasmPresentation,
 } from "./pkg/office_wasm.js";
 import { getLogLevel, onLogLevelChange } from "../apps/shared/logger";
 import type {
@@ -214,6 +215,37 @@ export async function loadDocx(bytes: Uint8Array): Promise<import("../apps/word/
     }
     return {
       model,
+      images,
+      dispose() {
+        for (const url of images.values()) URL.revokeObjectURL(url);
+      },
+    };
+  } finally {
+    handle.free();
+  }
+}
+
+/**
+ * 解析 pptx 字节为演示模型 + 图片 URL(按 幻灯序号|embed 键)。
+ */
+export async function loadPptx(bytes: Uint8Array): Promise<import("../apps/ppt/model").PptDocument> {
+  await ensureReady();
+  const { imageKey } = await import("../apps/ppt/model");
+  const handle = WasmPresentation.parse(bytes);
+  try {
+    const presentation = handle.model as import("../apps/ppt/model").Presentation;
+    const images = new Map<string, string>();
+    const count = handle.imageCount;
+    for (let i = 0; i < count; i += 1) {
+      const embed = handle.imageEmbed(i);
+      if (!embed) continue;
+      const slide = handle.imageSlide(i);
+      const mime = handle.imageMime(i) ?? "application/octet-stream";
+      const buf = handle.imageBytes(i).slice().buffer;
+      images.set(imageKey(slide, embed), URL.createObjectURL(new Blob([buf], { type: mime })));
+    }
+    return {
+      presentation,
       images,
       dispose() {
         for (const url of images.values()) URL.revokeObjectURL(url);

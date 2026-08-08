@@ -26,6 +26,7 @@ pub mod format;
 pub mod formula;
 pub mod numfmt;
 pub mod ppt;
+pub mod pptx;
 pub mod render;
 pub mod sheet;
 pub mod word;
