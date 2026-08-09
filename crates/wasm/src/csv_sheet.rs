@@ -539,6 +539,7 @@ pub fn parse_csv_packed(
 #[wasm_bindgen]
 pub struct WasmWorkbook {
     sheets: Vec<office_core::xlsx::XlsxSheet>,
+    media: Vec<office_core::xlsx::XlsxMedia>,
 }
 
 #[wasm_bindgen]
@@ -546,7 +547,10 @@ impl WasmWorkbook {
     /// 解析 xlsx 字节为工作簿句柄。
     pub fn parse(bytes: &[u8]) -> Result<WasmWorkbook, JsValue> {
         let wb = office_core::xlsx::parse(bytes).map_err(|e| JsValue::from_str(&e))?;
-        Ok(WasmWorkbook { sheets: wb.sheets })
+        Ok(WasmWorkbook {
+            sheets: wb.sheets,
+            media: wb.media,
+        })
     }
 
     /// 工作表数量。
@@ -621,6 +625,67 @@ impl WasmWorkbook {
             arr.push(&m);
         }
         Ok(arr.into())
+    }
+
+    /// 第 `i` 张工作表的内嵌图片锚点
+    /// `[{mediaKey, fromRow, fromCol, toRow?, toCol?, extW?, extH?}, ...]`。
+    pub fn images(&self, i: usize) -> Result<JsValue, JsValue> {
+        let s = self
+            .sheets
+            .get(i)
+            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
+        let arr = js_sys::Array::new();
+        for img in &s.images {
+            let o = js_sys::Object::new();
+            js_sys::Reflect::set(&o, &"mediaKey".into(), &JsValue::from_str(&img.media_key))?;
+            js_sys::Reflect::set(
+                &o,
+                &"fromRow".into(),
+                &JsValue::from_f64(img.from_row as f64),
+            )?;
+            js_sys::Reflect::set(
+                &o,
+                &"fromCol".into(),
+                &JsValue::from_f64(img.from_col as f64),
+            )?;
+            if let Some((tr, tc)) = img.to {
+                js_sys::Reflect::set(&o, &"toRow".into(), &JsValue::from_f64(tr as f64))?;
+                js_sys::Reflect::set(&o, &"toCol".into(), &JsValue::from_f64(tc as f64))?;
+            }
+            if let Some((w, h)) = img.ext_px {
+                js_sys::Reflect::set(&o, &"extW".into(), &JsValue::from_f64(w))?;
+                js_sys::Reflect::set(&o, &"extH".into(), &JsValue::from_f64(h))?;
+            }
+            arr.push(&o);
+        }
+        Ok(arr.into())
+    }
+
+    /// 媒体(图片)数量。
+    #[wasm_bindgen(js_name = mediaCount)]
+    pub fn media_count(&self) -> usize {
+        self.media.len()
+    }
+
+    /// 第 `i` 份媒体的键(如 `xl/media/image1.png`)。
+    #[wasm_bindgen(js_name = mediaKey)]
+    pub fn media_key(&self, i: usize) -> Option<String> {
+        self.media.get(i).map(|m| m.key.clone())
+    }
+
+    /// 第 `i` 份媒体的 MIME。
+    #[wasm_bindgen(js_name = mediaMime)]
+    pub fn media_mime(&self, i: usize) -> Option<String> {
+        self.media.get(i).map(|m| m.mime.clone())
+    }
+
+    /// 第 `i` 份媒体的字节。
+    #[wasm_bindgen(js_name = mediaBytes)]
+    pub fn media_bytes(&self, i: usize) -> Vec<u8> {
+        self.media
+            .get(i)
+            .map(|m| m.data.clone())
+            .unwrap_or_default()
     }
 }
 

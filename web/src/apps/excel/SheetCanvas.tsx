@@ -152,6 +152,29 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
     renderer.setSelectionRange(null);
     setZoom(renderer.getZoom());
     renderer.requestFrame();
+
+    // 内嵌图片(xlsx):解码位图,按 dpr 预算 ext,推给渲染器覆盖层
+    const imgs = sheet.images ?? [];
+    if (imgs.length > 0) {
+      const dpr = renderer.getDpr();
+      const overlay = imgs.map((im) => {
+        const image = new Image();
+        image.onload = () => rendererRef.current?.requestFrame();
+        image.src = im.url;
+        return {
+          fromRow: im.fromRow,
+          fromCol: im.fromCol,
+          toRow: im.toRow,
+          toCol: im.toCol,
+          extWDev: im.extW !== undefined ? im.extW * dpr : undefined,
+          extHDev: im.extH !== undefined ? im.extH * dpr : undefined,
+          image,
+        };
+      });
+      renderer.setImages(overlay);
+    } else {
+      renderer.setImages([]);
+    }
   }, [sheet]);
 
   // 冻结变化:推给渲染器(重置滚动、切换到四象限绘制)

@@ -76,6 +76,7 @@ import {
   TextFitter,
   type CellTextSource,
   type StyleAt,
+  type OverlayImage,
 } from "./layers";
 import {
   anchorTile,
@@ -238,6 +239,8 @@ export class GridRenderer {
 
   private hover: CellRef | null = null;
   private selection: CellRef | null = null;
+  /** 内嵌图片(xlsx);已按当前 dpr 预算好尺寸。 */
+  private images: OverlayImage[] = [];
   private selectionRange: { row0: number; row1: number; col0: number; col1: number } | null = null;
 
   /** 当前瓦片;`null` 表示还没画过。 */
@@ -343,6 +346,7 @@ export class GridRenderer {
     this.selection = sheet && sheet.rows > 0 ? { row: 0, col: 0 } : null;
     this.hover = null;
     this.colWidthOverrides = [];
+    this.images = [];
     this.windowCache = null;
     this.tile = null;
     this.sheetSetAt = this.now();
@@ -523,6 +527,12 @@ export class GridRenderer {
     range: { row0: number; row1: number; col0: number; col1: number } | null,
   ): void {
     this.selectionRange = range;
+    this.invalidate("overlay");
+  }
+
+  /** 设置内嵌图片(xlsx);在覆盖层绘制,随滚动定位。 */
+  setImages(images: OverlayImage[]): void {
+    this.images = images;
     this.invalidate("overlay");
   }
 
@@ -819,6 +829,7 @@ export class GridRenderer {
           hover: this.hover,
           selection: this.selection,
           selectionRange: this.selectionRange,
+          images: this.images,
         });
         this.stats.layerPaints.overlay += 1;
       }

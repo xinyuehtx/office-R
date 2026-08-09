@@ -229,6 +229,18 @@ export async function loadXlsx(bytes: Uint8Array): Promise<XlsxWorkbookHandle> {
   await ensureReady();
   const wb = WasmWorkbook.parse(bytes);
   const sheetNames = wb.sheetNames() as string[];
+
+  // 媒体(图片)→ object URL,按 media key 索引;整簿共用,dispose 时统一 revoke
+  const mediaUrls = new Map<string, string>();
+  const mediaCount = wb.mediaCount();
+  for (let i = 0; i < mediaCount; i += 1) {
+    const key = wb.mediaKey(i);
+    if (!key) continue;
+    const mime = wb.mediaMime(i) ?? "application/octet-stream";
+    const buf = wb.mediaBytes(i).slice().buffer;
+    mediaUrls.set(key, URL.createObjectURL(new Blob([buf], { type: mime })));
+  }
+
   return {
     sheetNames,
     openSheet(index: number): SheetHandle {
@@ -251,9 +263,34 @@ export async function loadXlsx(bytes: Uint8Array): Promise<XlsxWorkbookHandle> {
       }
       handle.cellStyle = (r, c) => styleMap.get(`${r},${c}`) ?? null;
       handle.merges = wb.merges(index) as [number, number, number, number][];
+      // 内嵌图片:锚点 + object URL
+      const anchors = wb.images(index) as Array<{
+        mediaKey: string;
+        fromRow: number;
+        fromCol: number;
+        toRow?: number;
+        toCol?: number;
+        extW?: number;
+        extH?: number;
+      }>;
+      handle.images = anchors.flatMap((a) => {
+        const url = mediaUrls.get(a.mediaKey);
+        if (!url) return [];
+        const img: import("../apps/shared/sheet").SheetImage = {
+          fromRow: a.fromRow,
+          fromCol: a.fromCol,
+          url,
+        };
+        if (a.toRow !== undefined) img.toRow = a.toRow;
+        if (a.toCol !== undefined) img.toCol = a.toCol;
+        if (a.extW !== undefined) img.extW = a.extW;
+        if (a.extH !== undefined) img.extH = a.extH;
+        return [img];
+      });
       return handle;
     },
     dispose() {
+      for (const url of mediaUrls.values()) URL.revokeObjectURL(url);
       wb.free();
     },
   };

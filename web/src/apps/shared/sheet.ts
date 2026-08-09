@@ -90,6 +90,21 @@ export interface CellStyle {
   align?: "left" | "center" | "right";
 }
 
+/** 内嵌图片(锚定单元格 + object URL)。 */
+export interface SheetImage {
+  /** 左上锚单元格(0 基)。 */
+  fromRow: number;
+  fromCol: number;
+  /** 右下锚(twoCellAnchor);无则用 extW/extH。 */
+  toRow?: number;
+  toCol?: number;
+  /** 尺寸(oneCellAnchor,CSS 像素)。 */
+  extW?: number;
+  extH?: number;
+  /** 图片 object URL。 */
+  url: string;
+}
+
 /** 只读表格句柄。 */
 export interface SheetHandle {
   /** 行数(过滤后为可视行数)。 */
@@ -139,6 +154,8 @@ export interface SheetHandle {
   cellStyle?(row: number, col: number): CellStyle | null;
   /** 合并单元格区域 `[row0, col0, row1, col1]`(0 基,含首尾)。 */
   merges?: [number, number, number, number][];
+  /** 内嵌图片(xlsx)。 */
+  images?: SheetImage[];
   /** 释放底层资源(WASM 线性内存里的表格)。 */
   dispose(): void;
 }

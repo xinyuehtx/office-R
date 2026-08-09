@@ -9,8 +9,10 @@
 //! 布尔归一为 `TRUE`/`FALSE`,日期序列数换算成 `YYYY-MM-DD[ HH:MM:SS]`(自实现,不引入 chrono)。
 //! 合并区(`mergeCells`)解析进 `XlsxSheet::merges`;单元格视觉样式(加粗/斜体/文字色/
 //! 填充背景/水平对齐,自解析 `fonts`/`fills`/`cellXfs`)进 `XlsxSheet::formats`,网格按格渲染。
+//! 内嵌图片(`xl/drawings` 锚点 + `media` 字节)进 `XlsxSheet::images` / `XlsxWorkbook::media`,
+//! 网格覆盖层按锚点单元格近似定位绘制。
 //!
-//! **非目标**:边框线渲染、合并区的跨格视觉合并(已解析,当前覆盖格留空)、条件格式。
+//! **非目标**:边框线渲染、合并区的跨格视觉合并(已解析,当前覆盖格留空)、条件格式、图表/迷你图。
 
 use std::io::{Cursor, Read};
 
@@ -35,6 +37,30 @@ pub struct XlsxSheet {
     pub merges: Vec<(u32, u32, u32, u32)>,
     /// 非默认单元格样式:`(row, col, 样式)`。仅收录有加粗/斜体/颜色/填充/对齐的格。
     pub formats: Vec<(u32, u32, CellFmt)>,
+    /// 内嵌图片(锚定到单元格);字节在 [`XlsxWorkbook::media`] 里按 `media_key` 取。
+    pub images: Vec<XlsxImage>,
+}
+
+/// 锚定到单元格的内嵌图片。位置以单元格下标 + 尺寸表达(网格按自身列宽近似定位)。
+#[derive(Debug, Clone)]
+pub struct XlsxImage {
+    /// 媒体键(如 `xl/media/image1.png`),在 [`XlsxWorkbook::media`] 里唯一。
+    pub media_key: String,
+    /// 左上锚起始单元格(0 基)。
+    pub from_row: u32,
+    pub from_col: u32,
+    /// 右下锚单元格(twoCellAnchor);oneCellAnchor 为 `None`(用 `ext_px`)。
+    pub to: Option<(u32, u32)>,
+    /// 尺寸(oneCellAnchor 的 `a:ext`,像素);twoCell 为 `None`。
+    pub ext_px: Option<(f64, f64)>,
+}
+
+/// 一份媒体字节(图片)。
+#[derive(Debug, Clone)]
+pub struct XlsxMedia {
+    pub key: String,
+    pub mime: String,
+    pub data: Vec<u8>,
 }
 
 /// 单元格视觉样式(只读渲染用)。
@@ -64,6 +90,8 @@ impl CellFmt {
 #[derive(Debug)]
 pub struct XlsxWorkbook {
     pub sheets: Vec<XlsxSheet>,
+    /// 全工作簿去重的媒体字节(图片),按 `media_key` 引用。
+    pub media: Vec<XlsxMedia>,
 }
 
 /// 解析 xlsx 字节为工作簿。失败返回可读错误。
@@ -78,6 +106,7 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
     let path_map = zip.as_mut().map(sheet_path_map).unwrap_or_default();
 
     let mut sheets = Vec::with_capacity(names.len());
+    let mut media: Vec<XlsxMedia> = Vec::new();
     for name in names {
         let values = wb.worksheet_range(&name).map_err(|e| e.to_string())?;
         let formulas_range = wb.worksheet_formula(&name).ok();
@@ -86,6 +115,12 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
         let (cell_styles, merges) = match (zip.as_mut(), path_map.get(&name)) {
             (Some(z), Some(path)) => read_cell_styles(z, path),
             _ => (std::collections::HashMap::new(), Vec::new()),
+        };
+
+        // 内嵌图片(自解析 worksheet rels → drawing → media)
+        let images = match (zip.as_mut(), path_map.get(&name)) {
+            (Some(z), Some(path)) => read_sheet_images(z, path, &mut media),
+            _ => Vec::new(),
         };
 
         let (sheet, formulas) = build_sheet(
@@ -112,10 +147,258 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
             formulas,
             merges,
             formats,
+            images,
         });
     }
 
-    Ok(XlsxWorkbook { sheets })
+    Ok(XlsxWorkbook { sheets, media })
+}
+
+/// 解析某工作表的内嵌图片:worksheet rels → drawingN.xml → 锚点 + embed;
+/// drawing rels → embed → media 路径;去重收集 media 字节到 `media`。
+fn read_sheet_images(
+    zip: &mut ZipArchive<Cursor<Vec<u8>>>,
+    sheet_path: &str,
+    media: &mut Vec<XlsxMedia>,
+) -> Vec<XlsxImage> {
+    // worksheet rels:.../worksheets/_rels/sheetN.xml.rels
+    let (dir, file) = sheet_path
+        .rsplit_once('/')
+        .unwrap_or(("xl/worksheets", sheet_path));
+    let ws_rels = format!("{dir}/_rels/{file}.rels");
+    let drawing_target = match zip_text(zip, &ws_rels) {
+        Some(xml) => find_rel_target(&xml, "drawing"),
+        None => None,
+    };
+    let Some(drawing_path) = drawing_target.map(|t| resolve_rel_path(dir, &t)) else {
+        return Vec::new();
+    };
+    // drawing rels:embed id → media 路径
+    let (ddir, dfile) = drawing_path
+        .rsplit_once('/')
+        .unwrap_or(("xl/drawings", &drawing_path));
+    let drels = format!("{ddir}/_rels/{dfile}.rels");
+    let embed_map = zip_text(zip, &drels)
+        .map(|xml| all_rel_targets(&xml, ddir))
+        .unwrap_or_default();
+
+    let xml = match zip_text(zip, &drawing_path) {
+        Some(x) => x,
+        None => return Vec::new(),
+    };
+    let raw = parse_drawing(&xml);
+
+    let mut out = Vec::new();
+    for (embed, from, to, ext) in raw {
+        let Some(key) = embed_map.get(&embed).cloned() else {
+            continue;
+        };
+        // 收集 media 字节(去重)
+        if !media.iter().any(|m| m.key == key) {
+            if let Ok(data) = {
+                let mut b = Vec::new();
+                match zip.by_name(&key) {
+                    Ok(mut f) => f.read_to_end(&mut b).map(|_| b),
+                    Err(_) => Ok(Vec::new()),
+                }
+            } {
+                if !data.is_empty() {
+                    media.push(XlsxMedia {
+                        mime: mime_of(&key),
+                        key: key.clone(),
+                        data,
+                    });
+                }
+            }
+        }
+        out.push(XlsxImage {
+            media_key: key,
+            from_row: from.0,
+            from_col: from.1,
+            to,
+            ext_px: ext,
+        });
+    }
+    out
+}
+
+/// 从 rels XML 找首个类型以 `suffix` 结尾的关系 target。
+fn find_rel_target(xml: &str, suffix: &str) -> Option<String> {
+    let mut reader = XmlReader::from_str(xml);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if local(&e) == "Relationship" => {
+                let ty = attr(&e, "Type").unwrap_or_default();
+                if ty.ends_with(suffix) {
+                    return attr(&e, "Target");
+                }
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// 从 rels XML 收集 id → 归一化后的目标路径(基于 `base_dir`)。
+fn all_rel_targets(xml: &str, base_dir: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let mut reader = XmlReader::from_str(xml);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if local(&e) == "Relationship" => {
+                if let (Some(id), Some(t)) = (attr(&e, "Id"), attr(&e, "Target")) {
+                    out.insert(id, resolve_rel_path(base_dir, &t));
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// 相对 rels target(可能含 `../`)按 `base_dir` 归一到 zip 内绝对路径。
+fn resolve_rel_path(base_dir: &str, target: &str) -> String {
+    if let Some(abs) = target.strip_prefix('/') {
+        return abs.to_string();
+    }
+    let mut parts: Vec<&str> = base_dir.split('/').collect();
+    for seg in target.split('/') {
+        match seg {
+            "." | "" => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
+/// 解析 drawingN.xml:返回 `(embed, (from_row,from_col), to?, ext_px?)` 列表。
+#[allow(clippy::type_complexity)]
+fn parse_drawing(xml: &str) -> Vec<(String, (u32, u32), Option<(u32, u32)>, Option<(f64, f64)>)> {
+    let mut reader = XmlReader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut out = Vec::new();
+    // 当前锚状态
+    let mut from: Option<(u32, u32)> = None;
+    let mut to: Option<(u32, u32)> = None;
+    let mut ext: Option<(f64, f64)> = None;
+    let mut embed: Option<String> = None;
+    // from/to 内部当前读到的 col/row(文本在子元素里)
+    let mut in_from = false;
+    let mut in_to = false;
+    let mut cur_col: Option<u32> = None;
+    let mut cur_row: Option<u32> = None;
+    let mut text_target: Option<char> = None; // 'c' col / 'r' row
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => match local(&e).as_str() {
+                "twoCellAnchor" | "oneCellAnchor" => {
+                    from = None;
+                    to = None;
+                    ext = None;
+                    embed = None;
+                }
+                "from" => {
+                    in_from = true;
+                    cur_col = None;
+                    cur_row = None;
+                }
+                "to" => {
+                    in_to = true;
+                    cur_col = None;
+                    cur_row = None;
+                }
+                "col" if in_from || in_to => text_target = Some('c'),
+                "row" if in_from || in_to => text_target = Some('r'),
+                _ => {}
+            },
+            Ok(Event::Empty(e)) => {
+                let n = local(&e);
+                if n == "ext" {
+                    let cx = attr(&e, "cx").and_then(|s| s.parse::<f64>().ok());
+                    let cy = attr(&e, "cy").and_then(|s| s.parse::<f64>().ok());
+                    if let (Some(cx), Some(cy)) = (cx, cy) {
+                        ext = Some((emu(cx), emu(cy)));
+                    }
+                } else if n == "blip" {
+                    if let Some(id) = attr(&e, "embed") {
+                        embed = Some(id);
+                    }
+                }
+            }
+            Ok(Event::Text(t)) => {
+                if let Some(kind) = text_target.take() {
+                    if let Ok(s) = t.decode() {
+                        if let Ok(v) = s.trim().parse::<u32>() {
+                            if kind == 'c' {
+                                cur_col = Some(v);
+                            } else {
+                                cur_row = Some(v);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(e)) => match local_end(&e).as_str() {
+                "from" => {
+                    in_from = false;
+                    if let (Some(r), Some(c)) = (cur_row, cur_col) {
+                        from = Some((r, c));
+                    }
+                }
+                "to" => {
+                    in_to = false;
+                    if let (Some(r), Some(c)) = (cur_row, cur_col) {
+                        to = Some((r, c));
+                    }
+                }
+                "twoCellAnchor" | "oneCellAnchor" => {
+                    if let (Some(f), Some(em)) = (from, embed.take()) {
+                        out.push((em, f, to, ext));
+                    }
+                    from = None;
+                    to = None;
+                    ext = None;
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// 由扩展名推断图片 MIME。
+fn mime_of(path: &str) -> String {
+    let lower = path.to_lowercase();
+    if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".bmp") {
+        "image/bmp"
+    } else if lower.ends_with(".svg") {
+        "image/svg+xml"
+    } else {
+        "application/octet-stream"
+    }
+    .to_string()
+}
+
+/// EMU → 像素(96 DPI):÷9525。
+fn emu(v: f64) -> f64 {
+    v / 9525.0
 }
 
 /// 从 calamine 的值区域(+ 可选公式区域 + 每格样式)构建显示表与公式清单。
@@ -780,6 +1063,61 @@ mod tests {
         assert_eq!(f.color.as_deref(), Some("FF0000"));
         assert_eq!(f.fill.as_deref(), Some("FFFF00"));
         assert_eq!(f.align.as_deref(), Some("center"));
+    }
+
+    /// 构造带内嵌图片(twoCellAnchor)的最小 xlsx。
+    fn image_xlsx() -> Vec<u8> {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::{CompressionMethod, ZipWriter};
+        // 2x2 PNG(最小合法)
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0xFD, 0xD4, 0x9A, 0x73, 0x00, 0x00, 0x00, 0x16, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0xF0, 0x1F, 0x8C, 0x0C, 0x0C, 0x0C, 0x00, 0x00, 0x0C,
+            0x0C, 0x02, 0xFC, 0x8B, 0x8D, 0xB0, 0x8D, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
+            0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let mut buf = Vec::new();
+        {
+            let mut w = ZipWriter::new(Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            let mut put = |name: &str, data: &[u8]| {
+                w.start_file(name, opts).unwrap();
+                w.write_all(data).unwrap();
+            };
+            put("[Content_Types].xml", br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#);
+            put("_rels/.rels", br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#);
+            put("xl/workbook.xml", br#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#);
+            put("xl/_rels/workbook.xml.rels", br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#);
+            put("xl/worksheets/sheet1.xml", br#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>x</t></is></c></row></sheetData><drawing r:id="rId1" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></worksheet>"#);
+            put("xl/worksheets/_rels/sheet1.xml.rels", br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#);
+            put("xl/drawings/drawing1.xml", br#"<?xml version="1.0"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>6</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:pic><xdr:blipFill><a:blip r:embed="rId1"/></xdr:blipFill></xdr:pic></xdr:twoCellAnchor></xdr:wsDr>"#);
+            put("xl/drawings/_rels/drawing1.xml.rels", br#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>"#);
+            put("xl/media/image1.png", PNG);
+            w.finish().unwrap();
+        }
+        buf
+    }
+
+    #[test]
+    fn parses_embedded_image() {
+        let wb = parse(&image_xlsx()).expect("应能解析");
+        let s = &wb.sheets[0];
+        assert_eq!(s.images.len(), 1, "一张图片");
+        let img = &s.images[0];
+        assert_eq!((img.from_row, img.from_col), (2, 1), "from 锚 (row2,col1)");
+        assert_eq!(img.to, Some((6, 4)), "to 锚 (row6,col4)");
+        assert_eq!(img.media_key, "xl/media/image1.png");
+        // 媒体字节已收集
+        let m = wb
+            .media
+            .iter()
+            .find(|m| m.key == img.media_key)
+            .expect("media");
+        assert_eq!(m.mime, "image/png");
+        assert!(!m.data.is_empty());
     }
 
     #[test]
