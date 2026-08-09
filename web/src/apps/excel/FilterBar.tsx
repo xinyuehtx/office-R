@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { FilterSpec, SheetHandle, UniqueValues } from "../shared/sheet";
 import { columnLabel } from "./grid/labels";
 
@@ -53,7 +53,7 @@ const NUM_OPS: { value: string; label: string }[] = [
  * 生效的过滤以「标签」列出,可单独或整体清除。重扫描在 Rust/WASM 侧完成,
  * 这里只负责收集条件与展示。
  */
-export function FilterBar({
+function FilterBarInner({
   sheet,
   activeCol,
   filters,
@@ -239,3 +239,10 @@ export function FilterBar({
     </div>
   );
 }
+
+/**
+ * 过滤面板。用 `memo` 包一层:它挂在 `SheetCanvas` 下,而后者会随渲染器统计更新
+ * 重渲染;面板自身最多列 500 个值集复选框,跟着一起重建的代价明显。
+ * props 全是稳定引用(`useCallback` / `useMemo`),浅比较足够。
+ */
+export const FilterBar = memo(FilterBarInner);

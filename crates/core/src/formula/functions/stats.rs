@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use super::math::num;
 use super::util::{
     arity, count_nonblank, count_numbers, matches_criteria, numbers_for_agg, FuncImpl,
 };
@@ -201,7 +202,7 @@ fn median(ev: &mut Evaluator, args: &[Node]) -> Value {
     if xs.is_empty() {
         return Value::Error(ExcelError::Num);
     }
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    xs.sort_by(|a, b| a.total_cmp(b));
     let n = xs.len();
     let m = if n % 2 == 1 {
         xs[n / 2]
@@ -264,7 +265,9 @@ fn agg_variance(ev: &mut Evaluator, args: &[Node], population: bool, sqrt: bool)
         Err(e) => return Value::Error(e),
     };
     match variance(&xs, population) {
-        Ok(v) => Value::Number(if sqrt { v.sqrt() } else { v }),
+        // 走 num() 收口:极大值输入会让 mean 变 inf、(x-mean)^2 变 NaN,
+        // NaN 逃逸出去会让 MEDIAN/LARGE/SMALL 的排序 panic。
+        Ok(v) => num(if sqrt { v.sqrt() } else { v }),
         Err(e) => Value::Error(e),
     }
 }
@@ -291,7 +294,7 @@ fn nth_ordered(ev: &mut Evaluator, args: &[Node], largest: bool) -> Value {
     if k < 1 || k as usize > xs.len() {
         return Value::Error(ExcelError::Num);
     }
-    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    xs.sort_by(|a, b| a.total_cmp(b));
     let idx = if largest {
         xs.len() - k as usize
     } else {
@@ -341,6 +344,34 @@ mod tests {
             wb.set_input(i as u32, 0, &v.to_string()); // A1:A5
         }
         wb
+    }
+
+    /// NaN 不得逃逸成 `Value::Number` —— 否则 MEDIAN/LARGE/SMALL 的排序会 panic,
+    /// 在 WASM 里等于整个模块作废。极大值让 mean=inf → (x-mean)^2=NaN 是最短触发路径。
+    #[test]
+    fn non_finite_intermediates_become_num_error_not_panic() {
+        let mut wb = Workbook::new();
+        wb.set_input(0, 0, "1e308");
+        wb.set_input(1, 0, "1e308");
+        // STDEV 的中间量溢出 → #NUM!,而不是 NaN
+        assert_eq!(
+            wb.eval_formula("STDEV(A1:A2)"),
+            Value::Error(ExcelError::Num)
+        );
+        assert_eq!(wb.eval_formula("VAR(A1:A2)"), Value::Error(ExcelError::Num));
+        assert_eq!(
+            wb.eval_formula("SUBTOTAL(7,A1:A2)"),
+            Value::Error(ExcelError::Num)
+        );
+        // 即便 NaN 真的进了排序路径,也只能得到错误值,绝不 panic
+        assert_eq!(
+            wb.eval_formula("MEDIAN(STDEV(A1:A2),1,2)"),
+            Value::Error(ExcelError::Num)
+        );
+        assert_eq!(
+            wb.eval_formula("LARGE(A1:A2,1)"),
+            Value::Number(1e308_f64.max(1e308))
+        );
     }
 
     #[test]

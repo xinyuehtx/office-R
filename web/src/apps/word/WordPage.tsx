@@ -40,6 +40,13 @@ export function WordPage() {
   const layoutRef = useRef<Layout | null>(null);
   const imagesRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const rafRef = useRef<number | null>(null);
+  /**
+   * 打开请求的序号:只有最后一次 `openFile` 的结果能落地。
+   *
+   * 连续选两个文件时,先发的大文件可能后返回 —— 没有这道守卫就会用旧文档覆盖新文档,
+   * 且被覆盖的那份永远调不到 `dispose()`,object URL 全部泄漏。
+   */
+  const openSeqRef = useRef(0);
   /** 内容总高度:撑起滚动条(spacer 高度);canvas 只画可见切片。 */
   const [contentHeight, setContentHeight] = useState(0);
   /** 用户缩放倍率(50%–200%)。 */
@@ -178,6 +185,8 @@ export function WordPage() {
 
   const openFile = useCallback(
     async (file: File) => {
+      const seq = openSeqRef.current + 1;
+      openSeqRef.current = seq;
       setStatus("loading");
       setFileName(file.name);
       setError(null);
@@ -188,6 +197,11 @@ export function WordPage() {
       try {
         const bytes = new Uint8Array(await file.arrayBuffer());
         const doc = await loadDocx(bytes);
+        // 已被更晚的请求取代:立刻释放这份结果,不要覆盖当前文档
+        if (seq !== openSeqRef.current) {
+          doc.dispose();
+          return;
+        }
         docRef.current = doc;
 
         for (const id of imageIdsIn(doc.model)) {
@@ -215,6 +229,7 @@ export function WordPage() {
         if (scrollRef.current) scrollRef.current.scrollTop = 0;
         requestDraw();
       } catch (e) {
+        if (seq !== openSeqRef.current) return;
         setError(e instanceof Error ? e.message : String(e));
         setStatus("error");
       }

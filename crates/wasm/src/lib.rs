@@ -40,13 +40,3 @@ pub fn detect(bytes: &[u8]) -> String {
     }
     .to_string()
 }
-
-/// 读取 office 文件字节,识别并产出摘要,返回结构化结果。
-///
-/// 结果结构见 [`office_core::RenderResult`],通过 serde 序列化为 JS 对象。
-/// CSV 的表格渲染走 [`parse_csv_packed`],不经过这里。
-#[wasm_bindgen]
-pub fn render(bytes: &[u8]) -> Result<JsValue, JsValue> {
-    let result = office_core::render(bytes);
-    serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
-}

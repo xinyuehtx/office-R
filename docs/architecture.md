@@ -16,12 +16,12 @@ office-R 是一个**统一的 Office 三件套应用**(文档 / 表格 / 演示)
 ┌──────────────────────────────────────────────────────────────┐
 │  Web 视图层 (web/, React + Vite + TS)                          │
 │  ├─ App.tsx                顶部 Tab:文档 / 表格 / 演示          │
-│  ├─ apps/word · apps/ppt   上传 → 识别 → 摘要                   │
-│  ├─ apps/excel/            CSV 表格视图(本期重点)              │
+│  ├─ apps/word · apps/ppt   上传 → 解析 → canvas 渲染             │
+│  ├─ apps/excel/            CSV / xlsx 表格视图                   │
 │  │   ├─ ExcelPage.tsx      页面:上传 / 状态 / 元信息            │
 │  │   ├─ SheetCanvas.tsx    交互:尺寸自适应 / 滚轮 / 键盘 / 拖拽  │
 │  │   └─ grid/              渲染管线(见下)                      │
-│  ├─ apps/shared/           OfficePage / FileUpload /            │
+│  ├─ apps/shared/           FileUpload / sheet 契约 /            │
 │  │                         useOfficeFile / useCsvFile /         │
 │  │                         SheetHandle 接口 / logger             │
 │  └─ wasm/                  WASM 封装 + csvWorker(解析线程)      │
@@ -73,16 +73,21 @@ office-R 是一个**统一的 Office 三件套应用**(文档 / 表格 / 演示)
 > **异步**:主目标是浏览器 wasm,tokio 在此基本不可用,故**不引入 tokio**;
 > office 解析是同步 CPU 密集型任务,并发靠 Web Worker 解决。
 
-## 数据流一:摘要(Word / PPT / xlsx)
+## 数据流一:文档解析(Word / PPT / xlsx)
 
-1. 用户在页面选择 `.docx/.xlsx/.pptx`;
-2. `useOfficeFile` 读为 `Uint8Array`,调用 WASM `render(bytes)`;
-3. `office-core::render` 先 `detect_format`,再分发到对应组件;
-4. 返回 `RenderResult { format, format_name, byte_len, message, ok }`,页面展示。
+1. 用户在页面选择 `.docx/.xlsx/.pptx`,读为 `Uint8Array`;
+2. 调用对应的 WASM 入口(`WasmWordDoc.parse` / `WasmWorkbook.parse` /
+   `WasmPresentation.parse`),内核解析出**可直接渲染的模型**;
+3. 图片字节留在 WASM 内存,前端按 id 取出造 object URL(不走 base64),
+   canvas `drawImage` 直接用;句柄 `dispose()` 时统一 revoke,
+   加载**中途失败也会 revoke 已建的 URL**(否则调用方拿不到句柄就永远泄漏);
+4. 页面按模型绘制(Word 流式布局 + 虚拟化;PPT `fitScale` + `drawSlide`;
+   xlsx 复用下面的表格渲染管线)。
 
-CSV 走下面的表格渲染路径;若把 CSV 传到 Word/演示页,会得到「请切换到表格页」的引导。
+> 早期还有一条「识别 → 产出摘要文本」的轻量路径(`core::render` +
+> `shared/OfficePage`)。三页都长出真实渲染器后它就没有调用方了,已整链删除。
 
-## 数据流二:CSV 表格渲染(本期重点)
+## 数据流二:表格渲染(CSV / xlsx)
 
 ```
 ① 选择文件            useCsvFile:生成 traceId,读为字节
@@ -280,7 +285,7 @@ office-R/
 │   ├── core/          office-core:平台无关计算内核
 │   │   ├── src/csv/   CSV 解析(decode / dialect / error)
 │   │   ├── src/formula/  公式引擎(token/parser/ast/eval + functions/)
-│   │   └── {filter,numfmt,docx,pptx}.rs  过滤/数字格式/Word/PPT 解析
+│   │   └── {filter,numfmt,chart}.rs + {docx,xlsx,pptx}.rs  过滤/numfmt/图表 + 三格式解析
 │   └── wasm/          office-wasm:wasm-bindgen 绑定 + 日志
 ├── web/               React + Vite + TS 视图层(pnpm 管理)
 │   ├── src/apps/      word / excel / ppt 三页 + shared 复用
@@ -299,6 +304,26 @@ office-R/
 - WASM:`wasm-pack build crates/wasm --target web --out-dir web/src/wasm/pkg`
 - 前端:`pnpm -C web build`(通过 `VITE_BASE` 设置 Pages 子路径)
 - 部署:推送 `main` → GitHub Actions 构建 WASM + 前端 → 部署到 GitHub Pages
+
+### CI 拓扑(`.github/workflows/ci.yml`)
+
+```
+wasm ──┬─→ web   (typecheck / vitest / vite build)
+       └─→ e2e   (夹具生成 → playwright install → e2e)
+rust      (fmt / clippy --locked / test --locked,与 wasm 并行)
+```
+
+`wasm` job **只构建一次**产物并 `upload-artifact`,`web` / `e2e` 下载复用 ——
+release profile 是 `opt-level="z" + lto + codegen-units=1`(最慢一档),
+而 `Swatinem/rust-cache` 的 key 含 job 名,三个 job 各编一次时缓存互不命中。
+`web` job 因此完全不需要 Rust 工具链。
+
+其余门禁:`concurrency` 取消同分支旧运行;`permissions: contents: read`;
+每 job `timeout-minutes`;e2e 失败时上传 `playwright-report` + `test-results`
+(`trace: on-first-retry` 的产物此前一直被丢弃,CI 上的 flaky 无法排查)。
+
+> `e2e` job 仍装了原生 Rust —— 只因夹具由 `cargo test` 里的生成器构造。
+> 改成「入库夹具 + `rust` job 做漂移校验」后即可去掉。
 
 > 改动 `crates/core` 的公共数据结构后**务必重新构建 WASM**:
 > 前端引用的是 `web/src/wasm/pkg` 里的产物,不重建就会拿着旧的二进制跑,

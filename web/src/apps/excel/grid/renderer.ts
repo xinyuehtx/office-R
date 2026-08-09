@@ -195,6 +195,15 @@ const WINDOW_MARGIN = TILE_MARGIN * 2;
 /** 平均帧耗时的滑动窗口大小。 */
 const FRAME_SAMPLES = 60;
 
+/**
+ * `onStats` 回调的最小间隔(毫秒)。
+ *
+ * 统计只驱动状态栏上的 FPS 数字,但回调通向 React 的 `setState` ——
+ * 若每帧都发,滚动/hover 期间就会以 60fps 触发整棵页面子树重渲染,
+ * 把「三层画布、谁脏画谁」省下来的开销又还回去。节流到人眼够用的频率即可。
+ */
+const STATS_INTERVAL_MS = 500;
+
 /** 图层的堆叠顺序:表头压住单元格,覆盖层压住一切。 */
 const LAYER_ORDER: LayerName[] = ["body", "headers", "overlay"];
 
@@ -212,6 +221,8 @@ export class GridRenderer {
   private readonly now: () => number;
   private readonly tracer?: Tracer;
   private readonly onStats?: (stats: RendererStats) => void;
+  /** 上次向外发统计的时刻(节流用,见 [`STATS_INTERVAL_MS`])。 */
+  private lastStatsAt = Number.NEGATIVE_INFINITY;
 
   /** body 图层的裁剪容器:瓦片比可见区域大,靠它裁掉溢出表头的部分。 */
   private bodyClip: HTMLElement | null = null;
@@ -1142,7 +1153,9 @@ export class GridRenderer {
     for (const time of this.frameTimes) total += time;
     this.stats.avgFrameMs = total / this.frameTimes.length;
 
+    let firstFrame = false;
     if (this.stats.firstFrameMs === null && this.sheetSetAt !== null && this.sheet) {
+      firstFrame = true;
       this.stats.firstFrameMs = this.now() - this.sheetSetAt;
       this.tracer?.info("sheet.firstFrame", {
         ms: this.stats.firstFrameMs.toFixed(1),
@@ -1151,7 +1164,12 @@ export class GridRenderer {
         paintMs: elapsed.toFixed(1),
       });
     }
-    this.onStats?.(this.getStats());
+    // 统计回调节流:首帧立即发(页面要尽快显示行列数/首帧耗时),之后按间隔发。
+    const nowMs = this.now();
+    if (firstFrame || nowMs - this.lastStatsAt >= STATS_INTERVAL_MS) {
+      this.lastStatsAt = nowMs;
+      this.onStats?.(this.getStats());
+    }
   }
 }
 

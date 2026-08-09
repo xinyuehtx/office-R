@@ -49,7 +49,7 @@ web/ (React 视图)  ──wasm-bindgen──▶  crates/wasm (绑定)  ──�
 ## 目录结构
 
 ```
-crates/core/        Rust 计算内核(format/sheet/csv/formula/filter/numfmt/docx/pptx/render/word/excel/ppt)
+crates/core/        Rust 计算内核(format/sheet/csv/formula/filter/numfmt/chart/docx/xlsx/pptx)
   src/formula/      公式引擎:token/parser/ast/eval + functions/(math/stats/logical/…)
   src/filter.rs     列过滤:条件 → 命中行下标(供视图层行映射)
   src/numfmt.rs     Excel 数字格式码 → 显示文本

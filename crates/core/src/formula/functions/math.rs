@@ -66,7 +66,11 @@ fn unary(ev: &mut Evaluator, args: &[Node], f: impl Fn(f64) -> Value) -> Value {
     }
 }
 
-fn num(n: f64) -> Value {
+/// 把浮点结果收敛成值:非有限(NaN/±inf)一律映射为 `#NUM!`。
+///
+/// 这是**整个函数库的收口点** —— 一旦 NaN 逃逸到 `Value::Number`,
+/// 下游任何 `partial_cmp` 排序都会变成 panic 风险(见 `stats::median`)。
+pub(super) fn num(n: f64) -> Value {
     if n.is_finite() {
         Value::Number(n)
     } else {
@@ -639,10 +643,11 @@ fn subtotal(ev: &mut Evaluator, args: &[Node]) -> Value {
             let mean = nums.iter().sum::<f64>() / n as f64;
             let ss: f64 = nums.iter().map(|x| (x - mean).powi(2)).sum();
             let var = ss / (n - ddof) as f64;
+            // 同样走 num() 收口,避免 NaN 逃逸(见 stats::agg_variance)
             if code == 7 || code == 8 {
-                Value::Number(var.sqrt())
+                num(var.sqrt())
             } else {
-                Value::Number(var)
+                num(var)
             }
         }
         _ => Value::Error(ExcelError::Value),

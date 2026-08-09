@@ -4,7 +4,6 @@
 import init, {
   version as wasmVersion,
   detect as wasmDetect,
-  render as wasmRender,
   setLogLevel as wasmSetLogLevel,
   parseCsvPacked,
   WasmSheet,
@@ -25,16 +24,6 @@ import type {
 
 /** 识别出的格式,与 Rust 端 `Format` 对应。 */
 export type OfficeFormat = "docx" | "xlsx" | "pptx" | "csv" | "unknown";
-
-/** 渲染结果,与 Rust 端 `RenderResult` 对应。 */
-export interface RenderResult {
-  format: OfficeFormat;
-  format_name: string;
-  byte_len: number;
-  message: string;
-  /** 是否解析成功;false 时 message 为失败原因。 */
-  ok: boolean;
-}
 
 /**
  * 表格的紧凑传输表示。
@@ -89,12 +78,6 @@ export async function version(): Promise<string> {
 export async function detect(bytes: Uint8Array): Promise<OfficeFormat> {
   await ensureReady();
   return wasmDetect(bytes) as OfficeFormat;
-}
-
-/** 读取 office 文件并产出摘要(docx / xlsx / pptx 页面使用)。 */
-export async function render(bytes: Uint8Array): Promise<RenderResult> {
-  await ensureReady();
-  return wasmRender(bytes) as RenderResult;
 }
 
 /**
@@ -228,17 +211,26 @@ export interface XlsxWorkbookHandle {
 export async function loadXlsx(bytes: Uint8Array): Promise<XlsxWorkbookHandle> {
   await ensureReady();
   const wb = WasmWorkbook.parse(bytes);
-  const sheetNames = wb.sheetNames() as string[];
 
   // 媒体(图片)→ object URL,按 media key 索引;整簿共用,dispose 时统一 revoke
   const mediaUrls = new Map<string, string>();
-  const mediaCount = wb.mediaCount();
-  for (let i = 0; i < mediaCount; i += 1) {
-    const key = wb.mediaKey(i);
-    if (!key) continue;
-    const mime = wb.mediaMime(i) ?? "application/octet-stream";
-    const buf = wb.mediaBytes(i).slice().buffer;
-    mediaUrls.set(key, URL.createObjectURL(new Blob([buf], { type: mime })));
+  let sheetNames: string[];
+  try {
+    sheetNames = wb.sheetNames() as string[];
+    const mediaCount = wb.mediaCount();
+    for (let i = 0; i < mediaCount; i += 1) {
+      const key = wb.mediaKey(i);
+      if (!key) continue;
+      const mime = wb.mediaMime(i) ?? "application/octet-stream";
+      const buf = wb.mediaBytes(i).slice().buffer;
+      mediaUrls.set(key, URL.createObjectURL(new Blob([buf], { type: mime })));
+    }
+  } catch (e) {
+    // 构造中途失败:调用方拿不到句柄,也就永远调不到 dispose ——
+    // 必须在这里把 WASM 侧工作簿与已建的 object URL 一并释放,否则是永久泄漏。
+    revokeAll(mediaUrls.values());
+    wb.free();
+    throw e;
   }
 
   return {
@@ -298,10 +290,20 @@ export async function loadXlsx(bytes: Uint8Array): Promise<XlsxWorkbookHandle> {
       return handle;
     },
     dispose() {
-      for (const url of mediaUrls.values()) URL.revokeObjectURL(url);
+      revokeAll(mediaUrls.values());
       wb.free();
     },
   };
+}
+
+/**
+ * 释放一批 object URL。
+ *
+ * 半途失败的加载函数必须调它:局部 `images` Map 随异常一起被丢弃后,
+ * 调用方拿不到句柄、也就永远调不到 `dispose()`,已建的 URL 会挂到页面关闭。
+ */
+function revokeAll(urls: Iterable<string>): void {
+  for (const url of urls) URL.revokeObjectURL(url);
 }
 
 /**
@@ -316,22 +318,27 @@ export async function loadDocx(bytes: Uint8Array): Promise<import("../apps/word/
   try {
     const model = handle.model as import("../apps/word/model").WordModel;
     const images = new Map<string, string>();
-    const count = handle.imageCount;
-    for (let i = 0; i < count; i += 1) {
-      const id = handle.imageId(i);
-      if (!id) continue;
-      const mime = handle.imageMime(i) ?? "application/octet-stream";
-      const data = handle.imageBytes(i);
-      // 复制成独立 ArrayBuffer,规避 wasm 内存 buffer 的类型不匹配
-      const buf = data.slice().buffer;
-      const url = URL.createObjectURL(new Blob([buf], { type: mime }));
-      images.set(id, url);
+    try {
+      const count = handle.imageCount;
+      for (let i = 0; i < count; i += 1) {
+        const id = handle.imageId(i);
+        if (!id) continue;
+        const mime = handle.imageMime(i) ?? "application/octet-stream";
+        const data = handle.imageBytes(i);
+        // 复制成独立 ArrayBuffer,规避 wasm 内存 buffer 的类型不匹配
+        const buf = data.slice().buffer;
+        const url = URL.createObjectURL(new Blob([buf], { type: mime }));
+        images.set(id, url);
+      }
+    } catch (e) {
+      revokeAll(images.values());
+      throw e;
     }
     return {
       model,
       images,
       dispose() {
-        for (const url of images.values()) URL.revokeObjectURL(url);
+        revokeAll(images.values());
       },
     };
   } finally {
@@ -348,20 +355,25 @@ export async function loadPptx(bytes: Uint8Array): Promise<import("../apps/ppt/m
   try {
     const presentation = handle.model as import("../apps/ppt/model").Presentation;
     const images = new Map<string, string>();
-    const count = handle.imageCount;
-    for (let i = 0; i < count; i += 1) {
-      const embed = handle.imageEmbed(i);
-      if (!embed) continue;
-      const slide = handle.imageSlide(i);
-      const mime = handle.imageMime(i) ?? "application/octet-stream";
-      const buf = handle.imageBytes(i).slice().buffer;
-      images.set(imageKey(slide, embed), URL.createObjectURL(new Blob([buf], { type: mime })));
+    try {
+      const count = handle.imageCount;
+      for (let i = 0; i < count; i += 1) {
+        const embed = handle.imageEmbed(i);
+        if (!embed) continue;
+        const slide = handle.imageSlide(i);
+        const mime = handle.imageMime(i) ?? "application/octet-stream";
+        const buf = handle.imageBytes(i).slice().buffer;
+        images.set(imageKey(slide, embed), URL.createObjectURL(new Blob([buf], { type: mime })));
+      }
+    } catch (e) {
+      revokeAll(images.values());
+      throw e;
     }
     return {
       presentation,
       images,
       dispose() {
-        for (const url of images.values()) URL.revokeObjectURL(url);
+        revokeAll(images.values());
       },
     };
   } finally {

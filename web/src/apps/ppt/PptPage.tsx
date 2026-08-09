@@ -35,6 +35,13 @@ export function PptPage() {
   const mainCanvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number | null>(null);
+  /**
+   * 打开请求的序号:只有最后一次 `openFile` 的结果能落地。
+   *
+   * 连续选两个文件时,先发的大文件可能后返回 —— 没有这道守卫就会用旧文档覆盖新文档,
+   * 且被覆盖的那份永远调不到 `dispose()`,object URL 全部泄漏。
+   */
+  const openSeqRef = useRef(0);
 
   /** 绘制当前幻灯到主画布(适配 stage 尺寸)。 */
   const draw = useCallback(() => {
@@ -117,6 +124,8 @@ export function PptPage() {
 
   const openFile = useCallback(
     async (file: File) => {
+      const seq = openSeqRef.current + 1;
+      openSeqRef.current = seq;
       setStatus("loading");
       setFileName(file.name);
       setError(null);
@@ -127,6 +136,11 @@ export function PptPage() {
       try {
         const bytes = new Uint8Array(await file.arrayBuffer());
         const doc = await loadPptx(bytes);
+        // 已被更晚的请求取代:立刻释放这份结果,不要覆盖当前文档
+        if (seq !== openSeqRef.current) {
+          doc.dispose();
+          return;
+        }
         docRef.current = doc;
 
         // 预加载图片(键含幻灯序号)
@@ -145,6 +159,7 @@ export function PptPage() {
         setStatus("ready");
         requestDraw();
       } catch (e) {
+        if (seq !== openSeqRef.current) return;
         setError(e instanceof Error ? e.message : String(e));
         setStatus("error");
       }

@@ -792,21 +792,27 @@ fn read_style_table(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> StyleTable {
                         let style = attr(&e, "style");
                         // 无 style(或 none)= 无边框;有 style 才成边,颜色待 <color> 子元素
                         if style.as_deref().is_some_and(|s| s != "none") {
-                            cur_side = Some((n.clone(), style));
                             if empty {
-                                apply_side(
-                                    cur_border.as_mut().unwrap(),
-                                    &n,
-                                    &cur_side.take().unwrap().1,
-                                    None,
-                                );
+                                // 自闭合:不会有 <color> 子元素,直接按默认色落盘
+                                if let Some(b) = cur_border.as_mut() {
+                                    apply_side(b, &n, &style, None);
+                                }
+                            } else {
+                                cur_side = Some((n.clone(), style));
                             }
                         }
                     }
-                    "color" if cur_side.is_some() => {
+                    // 边框色。**必须同时校验 cur_border**:styles.xml 里
+                    // `<colors><mruColors><color rgb=".."/></mruColors></colors>` 是合法元素,
+                    // 同名但此时已在 `</border>` 之后,cur_border 为 None —— 早先这里
+                    // `cur_border.as_mut().unwrap()` 会 panic,在 WASM 里等于整个模块作废。
+                    "color" if cur_side.is_some() && cur_border.is_some() => {
                         let rgb = attr(&e, "rgb").map(|s| normalize_argb(&s));
-                        let (side_name, style) = cur_side.take().unwrap();
-                        apply_side(cur_border.as_mut().unwrap(), &side_name, &style, rgb);
+                        if let (Some((side_name, style)), Some(b)) =
+                            (cur_side.take(), cur_border.as_mut())
+                        {
+                            apply_side(b, &side_name, &style, rgb);
+                        }
                     }
                     "dxfs" => in_dxfs = true,
                     "dxf" if in_dxfs => {
@@ -868,7 +874,18 @@ fn read_style_table(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> StyleTable {
                         fills.push(cur_fill_color.take());
                     }
                 }
+                // 边收尾:无 <color> 子元素时也要落盘 ——
+                // 否则 `<left style="thin"></left>`(非自闭合、无颜色)会被整条丢掉。
+                "left" | "right" | "top" | "bottom" => {
+                    if let (Some((side_name, style)), Some(b)) =
+                        (cur_side.take(), cur_border.as_mut())
+                    {
+                        apply_side(b, &side_name, &style, None);
+                    }
+                }
                 "border" => {
+                    // 待落盘的边不得泄漏到 <border> 之外,否则后续任意同名 <color> 会误命中
+                    cur_side = None;
                     if let Some(b) = cur_border.take() {
                         borders.push(b);
                     }
@@ -1572,6 +1589,15 @@ mod tests {
 
     /// 构造带样式(numfmt 百分比)+ 合并单元格的最小 xlsx。
     fn styled_xlsx() -> Vec<u8> {
+        // styles:cellXfs[0]=默认;cellXfs[1]=numFmtId 9(0%);cellXfs[2]=自定义 164
+        let styles = r##"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.00"/></numFmts><fonts count="2"><font/><font><b/><color rgb="FFFF0000"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill></fills><borders count="2"><border><left/><right/><top/><bottom/></border><border><left style="thin"><color rgb="FF0000FF"/></left><right style="thin"><color rgb="FF0000FF"/></right><top style="thick"><color rgb="FF0000FF"/></top><bottom style="thin"><color rgb="FF0000FF"/></bottom></border></borders><cellXfs count="5"><xf numFmtId="0"/><xf numFmtId="9" applyNumberFormat="1"/><xf numFmtId="164" applyNumberFormat="1"/><xf numFmtId="0" fontId="1" fillId="2" applyFont="1" applyFill="1"><alignment horizontal="center"/></xf><xf numFmtId="164" borderId="1" applyNumberFormat="1" applyBorder="1"/></cellXfs></styleSheet>"##;
+        // A1=0.25 s=1(百分比);B1=1234.5 s=4(#,##0.00 + 蓝边框);A2 s=3(粗+红字+黄底+居中);合并 A2:B2
+        let sheet = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView><pane xSplit="1" ySplit="1" topLeftCell="B2" state="frozen"/></sheetView></sheetViews><cols><col min="2" max="2" width="20.5" customWidth="1"/></cols><sheetData><row r="1"><c r="A1" s="1"><v>0.25</v></c><c r="B1" s="4"><v>1234.5</v></c></row><row r="2"><c r="A2" s="3" t="inlineStr"><is><t>合并</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A2:B2"/></mergeCells></worksheet>"#;
+        xlsx_with(styles, sheet)
+    }
+
+    /// 组装一个最小 xlsx 包,只有 styles.xml 与 sheet1.xml 由调用方给定。
+    fn xlsx_with(styles: &str, sheet: &str) -> Vec<u8> {
         use std::io::{Cursor, Write};
         use zip::write::SimpleFileOptions;
         use zip::{CompressionMethod, ZipWriter};
@@ -1599,19 +1625,34 @@ mod tests {
                 "xl/_rels/workbook.xml.rels",
                 r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#,
             );
-            // styles:cellXfs[0]=默认;cellXfs[1]=numFmtId 9(0%);cellXfs[2]=自定义 164
-            put(
-                "xl/styles.xml",
-                r##"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.00"/></numFmts><fonts count="2"><font/><font><b/><color rgb="FFFF0000"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill></fills><borders count="2"><border><left/><right/><top/><bottom/></border><border><left style="thin"><color rgb="FF0000FF"/></left><right style="thin"><color rgb="FF0000FF"/></right><top style="thick"><color rgb="FF0000FF"/></top><bottom style="thin"><color rgb="FF0000FF"/></bottom></border></borders><cellXfs count="5"><xf numFmtId="0"/><xf numFmtId="9" applyNumberFormat="1"/><xf numFmtId="164" applyNumberFormat="1"/><xf numFmtId="0" fontId="1" fillId="2" applyFont="1" applyFill="1"><alignment horizontal="center"/></xf><xf numFmtId="164" borderId="1" applyNumberFormat="1" applyBorder="1"/></cellXfs></styleSheet>"##,
-            );
-            // A1=0.25 s=1(百分比);B1=1234.5 s=4(#,##0.00 + 蓝边框);A2 s=3(粗+红字+黄底+居中);合并 A2:B2
-            put(
-                "xl/worksheets/sheet1.xml",
-                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView><pane xSplit="1" ySplit="1" topLeftCell="B2" state="frozen"/></sheetView></sheetViews><cols><col min="2" max="2" width="20.5" customWidth="1"/></cols><sheetData><row r="1"><c r="A1" s="1"><v>0.25</v></c><c r="B1" s="4"><v>1234.5</v></c></row><row r="2"><c r="A2" s="3" t="inlineStr"><is><t>合并</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A2:B2"/></mergeCells></worksheet>"#,
-            );
+            put("xl/styles.xml", styles);
+            put("xl/worksheets/sheet1.xml", sheet);
             w.finish().unwrap();
         }
         buf
+    }
+
+    #[test]
+    fn malformed_border_styles_do_not_panic() {
+        // 三个曾致 panic / 丢数据的形态:
+        //  1. `<left style="thin"></left>` —— 非自闭合且无 <color> 子元素(早先整条边被丢掉);
+        //  2. `<colors><mruColors><color/>` —— 合法元素,同名 color 但已在 </border> 之后
+        //     (早先 `cur_border.as_mut().unwrap()` 在此 panic,WASM 里等于整个模块作废);
+        //  3. 未闭合的 <left> 后紧跟 </border>。
+        let styles = r##"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font/></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="2"><border><left/><right/><top/><bottom/></border><border><left style="thin"></left><top style="medium"/></border></borders><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="0" borderId="1" applyBorder="1"/></cellXfs><colors><mruColors><color rgb="FF00FF00"/><color rgb="FF00FFFF"/></mruColors></colors></styleSheet>"##;
+        let sheet = r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" s="1"><v>1</v></c></row></sheetData></worksheet>"#;
+
+        let wb = parse(&xlsx_with(styles, sheet)).expect("畸形边框样式不应导致解析失败");
+        let (_, _, fmt) = wb.sheets[0]
+            .formats
+            .iter()
+            .find(|(r, c, _)| *r == 0 && *c == 0)
+            .expect("A1 应有样式");
+        let b = fmt.border.as_ref().expect("应解析出边框");
+        // 无 <color> 子元素的边同样要落盘(默认色)
+        assert!(b.left.is_some(), "非自闭合且无颜色的 left 边不应被丢掉");
+        assert!(b.top.is_some(), "自闭合的 top 边应落盘");
+        assert!(b.right.is_none());
     }
 
     #[test]
