@@ -3,7 +3,7 @@ import { FileUpload } from "../shared/FileUpload";
 import { loadPptx } from "../../wasm";
 import type { PptDocument } from "./model";
 import { imageKey } from "./model";
-import { drawSlide, fitScale } from "./slideRender";
+import { drawSlide, fitScale, applyTransition, TRANSITION_MS } from "./slideRender";
 
 type Status = "idle" | "loading" | "ready" | "error";
 
@@ -23,6 +23,12 @@ export function PptPage() {
   const [presenting, setPresenting] = useState(false);
   /** 用户缩放倍率(在适配缩放之上叠加);演示模式恒为适配。 */
   const [zoom, setZoom] = useState(1);
+  /** 演示模式的入场动画步号(0 = 仅显示无动画的形状)。 */
+  const [step, setStep] = useState(0);
+  const stepRef = useRef(0);
+  stepRef.current = step;
+  /** 进行中的切换效果:类型 + 起始时间戳。 */
+  const transRef = useRef<{ kind: string | null; start: number } | null>(null);
 
   const docRef = useRef<PptDocument | null>(null);
   const imagesRef = useRef<Map<string, HTMLImageElement>>(new Map());
@@ -76,8 +82,32 @@ export function PptPage() {
 
     ctx.save();
     ctx.translate(offsetX, offsetY);
-    drawSlide(ctx, slide, scale, slideImages);
+    // 切换效果:演示模式换页时按进度做淡入/揭开/推入
+    const trans = transRef.current;
+    let animating = false;
+    if (trans) {
+      const t = (performance.now() - trans.start) / TRANSITION_MS;
+      if (t >= 1) {
+        transRef.current = null;
+      } else {
+        animating = true;
+        applyTransition(ctx, trans.kind, t, pres.width_px * scale, pres.height_px * scale);
+      }
+    }
+    // 入场动画:演示模式按当前步显示;普通视图显示全部
+    drawSlide(
+      ctx,
+      slide,
+      scale,
+      slideImages,
+      presenting ? stepRef.current : Number.POSITIVE_INFINITY,
+    );
     ctx.restore();
+
+    // 动画未结束 → 继续出帧
+    if (animating) {
+      rafRef.current = globalThis.requestAnimationFrame(draw);
+    }
   }, [current, zoom, presenting]);
 
   const requestDraw = useCallback(() => {
@@ -110,6 +140,8 @@ export function PptPage() {
         setSlideCount(doc.presentation.slides.length);
         setCurrent(0);
         setZoom(1);
+        setStep(0);
+        stepRef.current = 0;
         setStatus("ready");
         requestDraw();
       } catch (e) {
@@ -120,11 +152,52 @@ export function PptPage() {
     [requestDraw],
   );
 
+  /** 换页:演示模式下带切换效果,并把入场步复位。 */
   const go = useCallback(
     (delta: number) => {
-      setCurrent((c) => Math.min(slideCount - 1, Math.max(0, c + delta)));
+      setCurrent((c) => {
+        const next = Math.min(slideCount - 1, Math.max(0, c + delta));
+        if (next !== c) {
+          setStep(0);
+          stepRef.current = 0;
+          if (presenting) {
+            const kind = docRef.current?.presentation.slides[next]?.transition ?? null;
+            if (kind) transRef.current = { kind, start: performance.now() };
+          }
+        }
+        return next;
+      });
     },
-    [slideCount],
+    [slideCount, presenting],
+  );
+
+  /**
+   * 演示模式的「下一步」:先播完本页入场动画(逐步显示),再翻到下一页。
+   * 这与 PowerPoint 的点击行为一致。
+   */
+  const advance = useCallback(
+    (delta: number) => {
+      if (!presenting) {
+        go(delta);
+        return;
+      }
+      const slide = docRef.current?.presentation.slides[current];
+      const total = slide?.build_steps ?? 0;
+      if (delta > 0) {
+        if (stepRef.current < total) {
+          setStep((s) => s + 1);
+          return;
+        }
+        go(1);
+      } else {
+        if (stepRef.current > 0) {
+          setStep((s) => Math.max(0, s - 1));
+          return;
+        }
+        go(-1);
+      }
+    },
+    [presenting, current, go],
   );
 
   // 当前页 / 尺寸 / 就绪 变化重绘(就绪后 canvas 才挂载,需再画一次)
@@ -143,23 +216,28 @@ export function PptPage() {
     return () => ro?.disconnect();
   }, [status, presenting, requestDraw]);
 
-  // 演示模式:键盘翻页 / Esc 退出
+  // 演示模式:键盘翻页(先播入场动画,再翻页)/ Esc 退出
   useEffect(() => {
     if (!presenting) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "ArrowRight" || e.key === "PageDown" || e.key === " ") {
         e.preventDefault();
-        go(1);
+        advance(1);
       } else if (e.key === "ArrowLeft" || e.key === "PageUp") {
         e.preventDefault();
-        go(-1);
+        advance(-1);
       } else if (e.key === "Escape") {
         setPresenting(false);
       }
     };
     globalThis.addEventListener("keydown", onKey);
     return () => globalThis.removeEventListener("keydown", onKey);
-  }, [presenting, go]);
+  }, [presenting, advance]);
+
+  // 入场步变化:重绘
+  useEffect(() => {
+    if (status === "ready") requestDraw();
+  }, [step, status, requestDraw]);
 
   useEffect(
     () => () => {
@@ -173,6 +251,8 @@ export function PptPage() {
   const curSlide = docRef.current?.presentation.slides[current];
   const hasAnim = curSlide?.has_animation ?? false;
   const hasTrans = curSlide?.has_transition ?? false;
+  /** 本页入场动画总步数(0 = 无分步)。 */
+  const buildTotal = curSlide?.build_steps ?? 0;
 
   return (
     <section className="office-page" aria-label="演示 · PowerPoint">
@@ -180,8 +260,9 @@ export function PptPage() {
         <h2>演示 · PowerPoint</h2>
         <p className="office-page__subtitle">
           上传 .pptx 文件,在 canvas 上渲染幻灯:文本框、图片、自选图形与对齐;
-          形状旋转/翻转、渐变填充、内嵌表格、图表/SmartArt 占位、动画/切换徽标。
-          解析在 Rust/WASM 侧完成。支持缩放、缩略图导航与全屏演示模式。
+          形状旋转/翻转、渐变填充、内嵌表格与图表真实绘制、SmartArt 占位、动画/切换徽标。
+          解析在 Rust/WASM 侧完成。支持缩放、缩略图导航与全屏演示模式
+          ——演示时点击/方向键逐步播放入场动画,换页按切换效果淡入/揭开/推入。
         </p>
       </header>
 
@@ -197,7 +278,13 @@ export function PptPage() {
               type="button"
               className="office-page__link"
               data-testid="ppt-present"
-              onClick={() => setPresenting(true)}
+              onClick={() => {
+                setStep(0);
+                stepRef.current = 0;
+                const kind = docRef.current?.presentation.slides[current]?.transition ?? null;
+                if (kind) transRef.current = { kind, start: performance.now() };
+                setPresenting(true);
+              }}
             >
               ▶ 演示
             </button>
@@ -245,13 +332,20 @@ export function PptPage() {
             <div
               className="ppt-stage"
               ref={stageRef}
-              onClick={presenting ? () => go(1) : undefined}
+              onClick={presenting ? () => advance(1) : undefined}
             >
               <canvas ref={mainCanvasRef} data-testid="ppt-canvas" />
             </div>
             {presenting ? (
               <div className="ppt-present-hint">
-                {current + 1} / {slideCount} · 方向键翻页,Esc 退出
+                {current + 1} / {slideCount}
+                {buildTotal > 0 && (
+                  <span data-testid="ppt-build-step">
+                    {" "}
+                    · 动画 {Math.min(step, buildTotal)}/{buildTotal}
+                  </span>
+                )}{" "}
+                · 方向键/点击播放,Esc 退出
                 <button
                   type="button"
                   className="office-page__link"

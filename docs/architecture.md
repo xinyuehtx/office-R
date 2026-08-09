@@ -261,10 +261,14 @@ Rust、canvas 虚拟化 + 多级缓存」:
   的绘制项(分栏为贪心分配、页眉页脚各带分隔线、修订插入蓝色/删除红色+删除线),`WordPage` 用
   **sticky canvas + spacer** 纵向虚拟化(只画视口内的项)。字号/颜色经 serde 读 docx-rs 私有字段;图片字节 → Blob object URL。
 - **PPT**:`pptx.rs` 直接用 `zip + quick-xml` 解析 PresentationML(尺寸/顺序 → rels → spTree 形状/图片,
-  **旋转/翻转 `xfrm@rot/flipH/flipV`、母版 `txStyles` 文本默认样式继承、`graphicFrame` 图表/SmartArt 占位、
-  `timing`/`transition` 动画/切换标记**),用元素名栈区分 spPr 填充与 rPr 颜色,EMU÷9525;
+  **旋转/翻转 `xfrm@rot/flipH/flipV`、母版 `txStyles` 文本默认样式继承、组合形状 `grpSp`、渐变 `gradFill`、
+  内嵌表格 `a:tbl`、内嵌图表 `c:chart`(复用 `core/chart.rs`)、`graphicFrame` SmartArt 占位、
+  `timing`/`transition` 动画时间线**),用元素名栈区分 spPr 填充与 rPr 颜色,EMU÷9525;
+  动画把 `mainSeq` 里每个 `clickEffect` 记为一步,`spTgt@spid` 经 `cNvPr@id` 落到形状的 `appear_step`;
   `web/ppt/slideRender` 按 `fitScale` 等比铺进画布(形状几何/填充、文本折行+对齐、图片、旋转仿射变换、
-  图表/SmartArt 虚线占位框+类型标签),`PptPage` 提供缩略图导航、翻页(含动画/切换徽标)与**全屏演示模式**。
+  真实表格网格与图表、SmartArt 虚线占位框+类型标签),并按 `step` 过滤未出现的形状;
+  `PptPage` 提供缩略图导航、缩放、翻页(含动画/切换徽标)与**全屏演示模式**
+  ——演示时点击/方向键**先逐步播完入场动画再翻页**,换页按 `transition` 类型做淡入/揭开/推入。
 - **共享文本测量**(`web/shared/textMeasure.ts`):参考 pretext,`font→segment` 两级缓存 +
   OffscreenCanvas + 字体加载失效 + 二分裁剪 + 折行,三个页面共用一个实例。
 

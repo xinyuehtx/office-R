@@ -42,6 +42,8 @@ export interface Shape {
   table?: SlideTable | null;
   /** 内嵌图表;非图表为 null。 */
   chart?: SlideChart | null;
+  /** 入场步:0 = 一开始就显示;N = 演示模式第 N 次点击后出现。 */
+  appear_step?: number;
 }
 
 /** 幻灯内图表(与 Excel 图表同构)。 */
@@ -66,6 +68,10 @@ export interface Slide {
   has_animation?: boolean;
   /** 是否含切换效果(p:transition)。 */
   has_transition?: boolean;
+  /** 切换效果类型(fade/wipe/push/cut/…);无为 null。 */
+  transition?: string | null;
+  /** 入场动画的点击步数(0 = 无分步)。 */
+  build_steps?: number;
 }
 
 export interface Presentation {

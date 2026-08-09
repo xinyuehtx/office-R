@@ -13,12 +13,16 @@
 //! 主题配色 `schemeClr`(解析 `ppt/theme/theme1.xml` 的 `clrScheme`,含 tx1/bg1→dk1/lt1 默认映射)、
 //! 旋转/翻转(`a:xfrm@rot/@flipH/@flipV`)、文本默认样式继承(母版 `p:txStyles`)、
 //! 动画/切换标记(`p:timing`/`p:transition` → `has_animation`/`has_transition`)、
+//! **动画时间线**(`p:timing` 的 `mainSeq` → 逐个 `clickEffect` 记为一「步」,
+//! 目标 `p:spTgt@spid` 经 `p:cNvPr@id` 映射到形状的 `appear_step`;`build_steps` 为总步数)、
+//! **切换效果类型**(`p:transition` 的首个非声音子元素名 → `transition`,视图按 fade/wipe/push 播放)、
 //! SmartArt 占位(`p:graphicFrame` diagram → `placeholder_kind`)、
 //! 组合形状 `p:grpSp`(按 `chOff`/`chExt`→`off`/`ext` 映射子坐标,支持嵌套)、
 //! 渐变填充 `a:gradFill`(取首/末停靠色,视图上→下线性渐变)、
 //! 内嵌表格 `a:tbl`(列宽/行/单元格文本 → 视图绘制真实网格)、
 //! 内嵌图表(`c:chart r:id` → 经 slide rels 找 chartN.xml,复用 `crate::chart` 解析柱/线/饼)。
-//! **非目标**:动画/切换的具体时间线回放、SmartArt 真实绘制、自定义几何、图片填充、阴影效果、
+//! **非目标**:动画的具体效果类型/时长/缓动(只做「点击一步显示一批形状」)、
+//! `withEffect`/`afterEffect` 的自动播放、SmartArt 真实绘制、自定义几何、图片填充、阴影效果、
 //! 表格单元格合并/样式、图表坐标轴/图例。
 
 use std::collections::HashMap;
@@ -102,6 +106,12 @@ pub struct Shape {
     /// 图表关系 id(`c:chart r:id`);仅解析中转用,不序列化。
     #[serde(skip)]
     pub chart_rid: Option<String>,
+    /// 形状 id(`p:cNvPr@id`);仅用于匹配动画目标,不序列化。
+    #[serde(skip)]
+    pub spid: Option<u32>,
+    /// 入场步:0 = 一开始就显示;N = 演示模式第 N 次点击后出现。
+    #[serde(default)]
+    pub appear_step: u32,
 }
 
 /// 幻灯内表格(来自 `p:graphicFrame` 的 `a:tbl`)。
@@ -123,6 +133,13 @@ pub struct Slide {
     /// 该幻灯是否含切换效果(`p:transition`)。
     #[serde(default)]
     pub has_transition: bool,
+    /// 切换效果类型(`fade`/`wipe`/`push`/`cut`/…);无切换为 `None`。
+    #[serde(default)]
+    pub transition: Option<String>,
+    /// 入场动画的**点击步数**:0 表示无分步(所有形状一开始就显示);
+    /// N 表示需再点击 N 次才全部出现(演示模式据此逐步显示)。
+    #[serde(default)]
+    pub build_steps: u32,
 }
 
 /// 演示文稿模型(不含图片字节)。
@@ -423,6 +440,8 @@ struct ShapeBuilder {
     table: Option<Table>,
     /// 图表关系 id(`c:chart r:id`);解析后经 rels 换成 chart 数据。
     chart_rid: Option<String>,
+    /// 形状 id(`p:cNvPr@id`),用于匹配动画目标。
+    spid: Option<u32>,
 }
 
 impl ShapeBuilder {
@@ -447,6 +466,8 @@ impl ShapeBuilder {
             table: self.table,
             chart: None,
             chart_rid: self.chart_rid,
+            spid: self.spid,
+            appear_step: 0,
         }
     }
     fn is_renderable(&self) -> bool {
@@ -532,6 +553,39 @@ impl GroupXform {
     }
 }
 
+/// 处理 `p:timing` / `p:transition` 子树里的元素(Start 与 Empty 共用)。
+///
+/// - timing:`p:cTn@nodeType="clickEffect"` 表示「需再点一次才播」,据此递增步号;
+///   其后的 `p:spTgt@spid` 即该步要出现的形状(同一形状取首个步号)。
+///   `withEffect`/`afterEffect` 与前一步同时/随后播放,不额外递增。
+/// - transition:首个非声音子元素名即效果类型(fade/wipe/push/…)。
+fn handle_anim(
+    e: &BytesStart,
+    name: &str,
+    in_timing: bool,
+    in_transition: bool,
+    anim_step: &mut u32,
+    anim_map: &mut HashMap<u32, u32>,
+    transition_kind: &mut Option<String>,
+) {
+    if in_timing {
+        if name == "cTn" && attr(e, "nodeType").as_deref() == Some("clickEffect") {
+            *anim_step += 1;
+        } else if name == "spTgt" && *anim_step >= 1 {
+            if let Some(id) = attr(e, "spid").and_then(|s| s.parse::<u32>().ok()) {
+                anim_map.entry(id).or_insert(*anim_step);
+            }
+        }
+    }
+    if in_transition
+        && transition_kind.is_none()
+        && name != "transition"
+        && !matches!(name, "sndAc" | "stSnd" | "endSnd" | "snd")
+    {
+        *transition_kind = Some(name.to_string());
+    }
+}
+
 /// 解析单张幻灯的形状树。用元素名栈跟踪上下文(区分 spPr 填充 vs rPr 颜色等)。
 ///
 /// `ctx` 提供主题配色(解析 `schemeClr`)与占位符几何回退(占位符 sp 无 xfrm 时借用版式/母版)。
@@ -552,6 +606,13 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
     // 表格累积:是否在表格内 / 当前单元格文本缓冲(在单元格内则文本走此处而非形状段落)
     let mut in_cell = false;
     let mut cell_text = String::new();
+    // 动画:timing 子树内按 clickEffect 递增步号,spTgt@spid → 步号
+    let mut in_timing = false;
+    let mut anim_step: u32 = 0;
+    let mut anim_map: HashMap<u32, u32> = HashMap::new();
+    // 切换:transition 的首个子元素名即效果类型(排除声音)
+    let mut in_transition = false;
+    let mut transition_kind: Option<String> = None;
 
     while let Ok(ev) = reader.read_event_into(&mut buf) {
         match ev {
@@ -559,9 +620,15 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
             Event::Start(e) => {
                 let name = local(&e);
                 match name.as_str() {
-                    // 动画 / 切换:只标记存在
-                    "timing" => has_animation = true,
-                    "transition" => has_transition = true,
+                    // 动画 / 切换:标记存在并进入其子树(细节由 handle_anim 处理)
+                    "timing" => {
+                        has_animation = true;
+                        in_timing = true;
+                    }
+                    "transition" => {
+                        has_transition = true;
+                        in_transition = true;
+                    }
                     // 组合形状:压一层变换(其 xfrm 的 off/ext/chOff/chExt 随后填入)
                     "grpSp" => groups.push(GroupXform::default()),
                     // graphicFrame 起始:作为一个内容占位形状
@@ -606,6 +673,15 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
                     }
                     _ => {}
                 }
+                handle_anim(
+                    &e,
+                    &name,
+                    in_timing,
+                    in_transition,
+                    &mut anim_step,
+                    &mut anim_map,
+                    &mut transition_kind,
+                );
                 // 表格内的 gridCol/tr/tc(及其 Empty 形式)不走形状文本路径
                 if in_cell || cur.as_ref().and_then(|b| b.table.as_ref()).is_some() {
                     stack.push(name);
@@ -629,6 +705,15 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
                 if name == "transition" {
                     has_transition = true;
                 }
+                handle_anim(
+                    &e,
+                    &name,
+                    in_timing,
+                    in_transition,
+                    &mut anim_step,
+                    &mut anim_map,
+                    &mut transition_kind,
+                );
                 // graphicData@uri 指明内容类型(chart/diagram/table)
                 if name == "graphicData" {
                     if let Some(b) = cur.as_mut() {
@@ -676,6 +761,12 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
             }
             Event::End(_e) => {
                 let name = stack.pop().unwrap_or_default();
+                // 离开 timing / transition 子树
+                if name == "timing" {
+                    in_timing = false;
+                } else if name == "transition" {
+                    in_transition = false;
+                }
                 // 表格内元素:tc 收尾落一格文本;其它表格内元素跳过(不触发形状文本收尾)。
                 // 唯 graphicFrame 例外——它是外层容器,End 时才把带表格的形状落盘。
                 let in_table = cur.as_ref().and_then(|b| b.table.as_ref()).is_some();
@@ -748,10 +839,21 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
         buf.clear();
     }
 
+    // 把动画目标映射成每个形状的入场步(未被动画引用的形状为 0,一开始就显示)
+    if !anim_map.is_empty() {
+        for s in &mut shapes {
+            if let Some(id) = s.spid {
+                s.appear_step = anim_map.get(&id).copied().unwrap_or(0);
+            }
+        }
+    }
+
     Slide {
         shapes,
         has_animation,
         has_transition,
+        transition: transition_kind,
+        build_steps: anim_step,
     }
 }
 
@@ -1096,6 +1198,14 @@ fn handle_start(
     match name {
         "sp" | "pic" => {
             *cur = Some(ShapeBuilder::default());
+        }
+        "cNvPr" => {
+            // 形状 id:把动画目标(p:spTgt@spid)对应到形状
+            if let Some(b) = cur.as_mut() {
+                if b.spid.is_none() {
+                    b.spid = attr(e, "id").and_then(|s| s.parse::<u32>().ok());
+                }
+            }
         }
         "ph" => {
             // 占位符标识:type|idx(缺省空),用于向版式/母版借几何
@@ -1699,6 +1809,52 @@ mod tests {
     }
 
     #[test]
+    fn parses_animation_steps_and_transition_kind() {
+        // 两个形状(id 2/3),mainSeq 里两个 clickEffect 分别点名它们;切换为 wipe
+        let slide = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+          <p:sp><p:nvSpPr><p:cNvPr id="2" name="A"/></p:nvSpPr>
+            <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm>
+            <a:prstGeom prst="rect"/></p:spPr></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="3" name="B"/></p:nvSpPr>
+            <p:spPr><a:xfrm><a:off x="0" y="914400"/><a:ext cx="914400" cy="457200"/></a:xfrm>
+            <a:prstGeom prst="rect"/></p:spPr></p:sp>
+          <p:sp><p:nvSpPr><p:cNvPr id="4" name="C"/></p:nvSpPr>
+            <p:spPr><a:xfrm><a:off x="0" y="1828800"/><a:ext cx="914400" cy="457200"/></a:xfrm>
+            <a:prstGeom prst="rect"/></p:spPr></p:sp>
+        </p:spTree></p:cSld>
+        <p:transition spd="slow"><p:wipe dir="l"/></p:transition>
+        <p:timing><p:tnLst><p:par><p:cTn id="1" dur="indefinite" nodeType="tmRoot"><p:childTnLst>
+          <p:seq concurrent="1"><p:cTn id="2" dur="indefinite" nodeType="mainSeq"><p:childTnLst>
+            <p:par><p:cTn id="3" fill="hold" nodeType="clickEffect"><p:childTnLst>
+              <p:set><p:cBhvr><p:tgtEl><p:spTgt spid="3"/></p:tgtEl></p:cBhvr></p:set>
+            </p:childTnLst></p:cTn></p:par>
+            <p:par><p:cTn id="4" fill="hold" nodeType="clickEffect"><p:childTnLst>
+              <p:set><p:cBhvr><p:tgtEl><p:spTgt spid="4"/></p:tgtEl></p:cBhvr></p:set>
+            </p:childTnLst></p:cTn></p:par>
+          </p:childTnLst></p:cTn></p:seq>
+        </p:childTnLst></p:cTn></p:par></p:tnLst></p:timing></p:sld>"#;
+        let (theme, fallback, defaults) = empty_ctx();
+        let ctx = SlideCtx {
+            theme: &theme,
+            fallback: &fallback,
+            text_defaults: &defaults,
+        };
+        let s = parse_slide(slide, &ctx);
+        assert_eq!(s.transition.as_deref(), Some("wipe"));
+        assert_eq!(s.build_steps, 2, "两次点击");
+        // 形状 A(id2)无动画→0;B(id3)第 1 步;C(id4)第 2 步
+        let step_of = |spid: u32| {
+            s.shapes
+                .iter()
+                .find(|sh| sh.spid == Some(spid))
+                .map(|sh| sh.appear_step)
+        };
+        assert_eq!(step_of(2), Some(0));
+        assert_eq!(step_of(3), Some(1));
+        assert_eq!(step_of(4), Some(2));
+    }
+
+    #[test]
     fn detects_animation_and_transition() {
         let slide = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree></p:spTree></p:cSld>
           <p:transition><p:fade/></p:transition>
@@ -1804,18 +1960,27 @@ mod fixture_gen {
                 .as_bytes(),
             );
             put(&mut w, "ppt/slides/_rels/slide1.xml.rels", br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="image" Target="../media/image1.png"/></Relationships>"#);
-            // 第二张:标题 + 旋转矩形 + 图表占位(graphicFrame),并带切换/动画标记。
+            // 第二张:标题 + 旋转矩形(带入场动画)+ 图表占位,并带 fade 切换。
             let slide2 = r#"<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><p:cSld><p:spTree>
-             <p:sp><p:spPr><a:xfrm><a:off x="838200" y="365760"/><a:ext cx="7772400" cy="1000000"/></a:xfrm>
+             <p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/></p:nvSpPr><p:spPr><a:xfrm><a:off x="838200" y="365760"/><a:ext cx="7772400" cy="1000000"/></a:xfrm>
                <a:prstGeom prst="rect"/></p:spPr>
                <p:txBody><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="3200" b="1"><a:solidFill><a:srgbClr val="1F3864"/></a:solidFill></a:rPr><a:t>第二张幻灯</a:t></a:r></a:p></p:txBody></p:sp>
-             <p:sp><p:spPr><a:xfrm rot="2700000"><a:off x="838200" y="1800000"/><a:ext cx="2200000" cy="1200000"/></a:xfrm>
+             <p:sp><p:nvSpPr><p:cNvPr id="3" name="Rot"/></p:nvSpPr><p:spPr><a:xfrm rot="2700000"><a:off x="838200" y="1800000"/><a:ext cx="2200000" cy="1200000"/></a:xfrm>
                <a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="4472C4"/></a:solidFill></p:spPr></p:sp>
-             <p:graphicFrame><p:xfrm><a:off x="4200000" y="1800000"/><a:ext cx="3500000" cy="2600000"/></p:xfrm>
+             <p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="4" name="Chart"/></p:nvGraphicFramePr><p:xfrm><a:off x="4200000" y="1800000"/><a:ext cx="3500000" cy="2600000"/></p:xfrm>
                <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"/></a:graphic></p:graphicFrame>
            </p:spTree></p:cSld>
            <p:transition><p:fade/></p:transition>
-           <p:timing><p:tnLst/></p:timing></p:sld>"#;
+           <p:timing><p:tnLst><p:par><p:cTn id="1" dur="indefinite" nodeType="tmRoot"><p:childTnLst>
+             <p:seq concurrent="1"><p:cTn id="2" dur="indefinite" nodeType="mainSeq"><p:childTnLst>
+               <p:par><p:cTn id="3" fill="hold" nodeType="clickEffect"><p:childTnLst>
+                 <p:set><p:cBhvr><p:tgtEl><p:spTgt spid="3"/></p:tgtEl></p:cBhvr></p:set>
+               </p:childTnLst></p:cTn></p:par>
+               <p:par><p:cTn id="4" fill="hold" nodeType="clickEffect"><p:childTnLst>
+                 <p:set><p:cBhvr><p:tgtEl><p:spTgt spid="4"/></p:tgtEl></p:cBhvr></p:set>
+               </p:childTnLst></p:cTn></p:par>
+             </p:childTnLst></p:cTn></p:seq>
+           </p:childTnLst></p:cTn></p:par></p:tnLst></p:timing></p:sld>"#;
             put(&mut w, "ppt/slides/slide2.xml", slide2.as_bytes());
             put(&mut w, "ppt/media/image1.png", PNG);
             w.finish().unwrap();

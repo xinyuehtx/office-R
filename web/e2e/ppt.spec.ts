@@ -37,4 +37,31 @@ test.describe("PPT 只读:渲染 / 导航 / 演示模式", () => {
     await page.keyboard.press("Escape");
     await expect(page.locator(".ppt-layout--present")).toHaveCount(0);
   });
+
+  test("演示模式:入场动画逐步播放", async ({ page }) => {
+    await gotoTab(page, "演示");
+    await upload(page, "sample.pptx");
+    await expect(page.getByTestId("ppt-canvas")).toBeVisible();
+
+    // 第二页有 2 个 clickEffect 入场步
+    await page.getByTestId("ppt-thumb-1").click();
+    await expect(page.getByTestId("ppt-page")).toContainText("2 / 2");
+    await page.getByTestId("ppt-present").click();
+    const indicator = page.getByTestId("ppt-build-step");
+    await expect(indicator).toContainText("动画 0/2");
+
+    // 点击/方向键先播完本页动画,再翻页(末页则停住)
+    await page.keyboard.press("ArrowRight");
+    await expect(indicator).toContainText("动画 1/2");
+    await page.keyboard.press("ArrowRight");
+    await expect(indicator).toContainText("动画 2/2");
+    await page.keyboard.press("ArrowRight");
+    await expect(indicator).toContainText("动画 2/2");
+    // 回退先退动画步
+    await page.keyboard.press("ArrowLeft");
+    await expect(indicator).toContainText("动画 1/2");
+
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".ppt-layout--present")).toHaveCount(0);
+  });
 });

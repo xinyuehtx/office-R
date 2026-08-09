@@ -218,8 +218,11 @@ export function drawSlide(
   slide: Slide,
   scale: number,
   images: Map<string, HTMLImageElement>,
+  step = Number.POSITIVE_INFINITY,
 ) {
   for (const shape of slide.shapes) {
+    // 入场动画:尚未到该形状出现的步号时跳过(演示模式逐步显示)
+    if ((shape.appear_step ?? 0) > step) continue;
     const x = shape.x * scale;
     const y = shape.y * scale;
     const w = shape.width * scale;
@@ -305,6 +308,56 @@ export function drawSlide(
     }
 
     if (needXform) ctx.restore();
+  }
+}
+
+/** 切换效果时长(毫秒)。 */
+export const TRANSITION_MS = 420;
+
+/**
+ * 幻灯**切换效果**:按类型与进度 `t`(0→1)在 ctx 上设置透明度/裁剪/位移。
+ *
+ * 调用方须在 `save()` 之后、绘制幻灯之前调用,并在绘制后 `restore()`。
+ * ctx 原点应已平移到幻灯纸面左上角,`w`/`h` 为纸面尺寸。
+ * 未识别的类型(cut/none 等)按**瞬时切换**处理(不做任何变换)。
+ */
+export function applyTransition(
+  ctx: CanvasRenderingContext2D,
+  kind: string | null | undefined,
+  t: number,
+  w: number,
+  h: number,
+): void {
+  if (!kind) return;
+  const p = Math.max(0, Math.min(1, t));
+  if (p >= 1) return;
+  switch (kind.toLowerCase()) {
+    case "fade":
+    case "dissolve":
+    case "fadeover":
+    case "zoom":
+      ctx.globalAlpha = p;
+      break;
+    case "wipe":
+    case "strips":
+    case "blinds":
+    case "checker":
+    case "randombar":
+    case "split":
+      // 自左向右揭开
+      ctx.beginPath();
+      ctx.rect(0, 0, w * p, h);
+      ctx.clip();
+      break;
+    case "push":
+    case "cover":
+    case "pull":
+    case "comb":
+      // 自右侧推入
+      ctx.translate(w * (1 - p), 0);
+      break;
+    default:
+      break;
   }
 }
 

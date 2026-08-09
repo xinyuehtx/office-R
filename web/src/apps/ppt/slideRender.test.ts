@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { fitScale, drawSlide } from "./slideRender";
+import { fitScale, drawSlide, applyTransition } from "./slideRender";
 import type { Slide } from "./model";
 
 describe("fitScale", () => {
@@ -250,5 +250,95 @@ describe("drawSlide", () => {
     expect(calls).toContain("rotate");
     expect(calls).toContain("scale");
     expect(calls).toContain("restore");
+  });
+
+  it("入场动画:按步过滤未出现的形状", () => {
+    const text = (t: string, step: number) => ({
+      x: 0,
+      y: 0,
+      width: 300,
+      height: 60,
+      geom: null,
+      fill: null,
+      image: null,
+      paragraphs: [
+        { align: "left" as const, runs: [{ text: t, bold: false, italic: false, size_pt: 18, color: null }] },
+      ],
+      appear_step: step,
+    });
+    const slide: Slide = { shapes: [text("常驻", 0), text("第一步", 1), text("第二步", 2)] };
+
+    const at = (step: number) => {
+      const { ctx, calls } = fakeCtx();
+      drawSlide(ctx, slide, 1, new Map(), step);
+      return calls.filter((c) => c.startsWith("fillText:")).join("|");
+    };
+    expect(at(0)).toContain("常驻");
+    expect(at(0)).not.toContain("第一步");
+    expect(at(1)).toContain("第一步");
+    expect(at(1)).not.toContain("第二步");
+    expect(at(2)).toContain("第二步");
+    // 缺省(普通视图)显示全部
+    const { ctx, calls } = fakeCtx();
+    drawSlide(ctx, slide, 1, new Map());
+    expect(calls.join("|")).toContain("第二步");
+  });
+});
+
+describe("applyTransition", () => {
+  /** 记录 globalAlpha / clip / translate 的假 ctx。 */
+  function transCtx() {
+    const rects: number[][] = [];
+    const shifts: number[][] = [];
+    const state = { globalAlpha: 1, clipped: false };
+    const ctx = {
+      get globalAlpha() {
+        return state.globalAlpha;
+      },
+      set globalAlpha(v: number) {
+        state.globalAlpha = v;
+      },
+      beginPath: () => {},
+      rect: (x: number, y: number, w: number, h: number) => rects.push([x, y, w, h]),
+      clip: () => {
+        state.clipped = true;
+      },
+      translate: (x: number, y: number) => shifts.push([x, y]),
+    } as unknown as CanvasRenderingContext2D;
+    return { ctx, rects, shifts, state };
+  }
+
+  it("fade 按进度设置透明度", () => {
+    const { ctx, state } = transCtx();
+    applyTransition(ctx, "fade", 0.25, 100, 50);
+    expect(state.globalAlpha).toBeCloseTo(0.25);
+  });
+
+  it("wipe 自左向右裁剪", () => {
+    const { ctx, rects, state } = transCtx();
+    applyTransition(ctx, "wipe", 0.5, 100, 50);
+    expect(rects[0]).toEqual([0, 0, 50, 50]);
+    expect(state.clipped).toBe(true);
+  });
+
+  it("push 自右侧位移进入", () => {
+    const { ctx, shifts } = transCtx();
+    applyTransition(ctx, "push", 0.25, 100, 50);
+    expect(shifts[0]).toEqual([75, 0]);
+  });
+
+  it("无切换 / 已完成 / 未知类型不做变换", () => {
+    for (const [kind, t] of [
+      [null, 0.5],
+      ["fade", 1],
+      ["cut", 0.5],
+    ] as [string | null, number][]) {
+      const { ctx, rects, shifts, state } = transCtx();
+      applyTransition(ctx, kind, t, 100, 50);
+      expect(state.globalAlpha).toBe(1);
+      expect(state.clipped).toBe(false);
+      expect(rects).toHaveLength(0);
+      expect(shifts).toHaveLength(0);
+    }
   });
 });
