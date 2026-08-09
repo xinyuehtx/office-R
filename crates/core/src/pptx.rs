@@ -290,7 +290,7 @@ fn ordered_slide_paths(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> Vec<String> {
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Empty(e)) | Ok(Event::Start(e)) if local(&e) == "sldId" => {
-                    if let Some(rid) = attr_ns(&e, "id") {
+                    if let Some(rid) = attr(&e, "id") {
                         rids.push(rid);
                     }
                 }
@@ -665,7 +665,7 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
                     }
                     // 图表引用 <c:chart r:id="..."> → 记录 rId,parse() 中经 rels 换成数据
                     "chart" => {
-                        if let Some(id) = attr_ns(&e, "id") {
+                        if let Some(id) = attr(&e, "id") {
                             if let Some(b) = cur.as_mut() {
                                 b.chart_rid = Some(id);
                             }
@@ -722,7 +722,7 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
                 }
                 // 图表引用 <c:chart r:id="..."/>(空元素)
                 if name == "chart" {
-                    if let Some(id) = attr_ns(&e, "id") {
+                    if let Some(id) = attr(&e, "id") {
                         if let Some(b) = cur.as_mut() {
                             b.chart_rid = Some(id);
                         }
@@ -1257,7 +1257,7 @@ fn handle_start(
         }
         "blip" => {
             if let Some(b) = cur.as_mut() {
-                if let Some(id) = attr_ns(e, "embed") {
+                if let Some(id) = attr(e, "embed") {
                     b.image = Some(id);
                 }
             }
@@ -1419,11 +1419,6 @@ fn attr(e: &BytesStart, key: &str) -> Option<String> {
             None
         }
     })
-}
-
-/// 取带命名空间的属性(如 `r:embed` / `r:id`),按本地名匹配。
-fn attr_ns(e: &BytesStart, local_key: &str) -> Option<String> {
-    attr(e, local_key)
 }
 
 #[cfg(test)]

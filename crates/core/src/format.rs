@@ -11,7 +11,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::csv::CANDIDATES;
+/// CSV 识别与分隔符嗅探共用的候选分隔符,按优先级排列(同分时的兜底顺序)。
+///
+/// 定义放在这里而不是 [`crate::csv::dialect`]:识别是**所有格式的共同入口**,
+/// 让它零 crate 内依赖,将来把 detect 提成独立单元时就是零成本。
+/// 嗅探侧反向引用它。
+pub const CANDIDATES: [u8; 4] = *b",\t;|";
 
 /// ZIP 容器魔数(OOXML 文件共有)。
 const ZIP_MAGIC: &[u8] = b"PK\x03\x04";

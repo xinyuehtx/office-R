@@ -110,6 +110,25 @@ mod tests {
         }
     }
 
+    // 以下两个测试原挂在 xlsx.rs 下 —— 它们断言的一直是本模块的行为,
+    // 是「日历三合一」重构留下的回归护栏,随拆分归位。
+    #[test]
+    fn serial_to_date_basic() {
+        // 25569 = 1970-01-01;44197 = 2021-01-01
+        assert_eq!(serial_to_string(25569.0), "1970-01-01");
+        assert_eq!(serial_to_string(44197.0), "2021-01-01");
+        // 1900 年初:复刻闰年 bug 后 serial 1 = 1900-01-01、2 = 1900-01-02
+        assert_eq!(serial_to_string(1.0), "1900-01-01");
+        assert_eq!(serial_to_string(2.0), "1900-01-02");
+        assert_eq!(serial_to_string(60.0), "1900-02-29");
+    }
+
+    #[test]
+    fn serial_to_date_with_time() {
+        // 44197.5 = 2021-01-01 12:00:00
+        assert_eq!(serial_to_string(44197.5), "2021-01-01 12:00:00");
+    }
+
     /// 序列数 60 是 Lotus 遗留的虚构闰日,Excel 至今照显示不误。
     #[test]
     fn reproduces_the_1900_leap_year_bug() {

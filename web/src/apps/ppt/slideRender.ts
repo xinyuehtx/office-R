@@ -6,7 +6,7 @@
  */
 
 import type { Slide, Shape, Align, SlideTable } from "./model";
-import { FONT_FAMILY } from "../excel/grid/theme";
+import { FONT_FAMILY } from "../shared/fonts";
 import { sharedMeasurer } from "../shared/textMeasure";
 import { drawChartInRect } from "../shared/chartDraw";
 

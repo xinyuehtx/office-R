@@ -83,6 +83,5 @@ export const COLORS = {
   scrollbarTrack: "rgba(208, 215, 222, 0.35)",
 } as const;
 
-/** 绘制文字用的字体族。与页面正文一致,避免中文回退到难看的字体。 */
-export const FONT_FAMILY =
-  '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Helvetica, Arial, sans-serif';
+/** 字体族 —— 定义在 `shared/fonts`(它是文本度量的关注点,不是网格主题),这里转发。 */
+export { FONT_FAMILY } from "../../shared/fonts";

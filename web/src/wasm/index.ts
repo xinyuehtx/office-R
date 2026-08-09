@@ -2,8 +2,6 @@
 //
 // wasm-pack 生成的产物位于 ./pkg(构建产物,不入库)。首次调用前需 await ensureReady()。
 import init, {
-  version as wasmVersion,
-  detect as wasmDetect,
   setLogLevel as wasmSetLogLevel,
   parseCsvPacked,
   WasmSheet,
@@ -21,9 +19,6 @@ import type {
   SheetMeta,
   UniqueValues,
 } from "../apps/shared/sheet";
-
-/** 识别出的格式,与 Rust 端 `Format` 对应。 */
-export type OfficeFormat = "docx" | "xlsx" | "pptx" | "csv" | "unknown";
 
 /**
  * 表格的紧凑传输表示。
@@ -66,18 +61,6 @@ export async function ensureReady(): Promise<void> {
     });
   }
   await initialized;
-}
-
-/** 计算内核版本。 */
-export async function version(): Promise<string> {
-  await ensureReady();
-  return wasmVersion();
-}
-
-/** 识别文件格式。 */
-export async function detect(bytes: Uint8Array): Promise<OfficeFormat> {
-  await ensureReady();
-  return wasmDetect(bytes) as OfficeFormat;
 }
 
 /**

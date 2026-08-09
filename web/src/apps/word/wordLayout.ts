@@ -10,7 +10,7 @@
  */
 
 import type { TextMeasurer } from "../shared/textMeasure";
-import { FONT_FAMILY } from "../excel/grid/theme";
+import { FONT_FAMILY } from "../shared/fonts";
 import type { Block, Paragraph, Run, WordModel } from "./model";
 
 /** 页面内边距与默认排版常量(CSS 像素)。 */

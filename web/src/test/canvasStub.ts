@@ -92,7 +92,7 @@ export function createRecordingContext(charWidth = 7): RecordingContext {
 }
 
 /** 一个足以喂给渲染器的假 canvas 元素。 */
-export function createStubCanvas(
+function createStubCanvas(
   width = 800,
   height = 600,
   charWidth = 7,

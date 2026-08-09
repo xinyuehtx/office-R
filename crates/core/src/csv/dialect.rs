@@ -7,8 +7,8 @@
 //! 思路很朴素但足够稳:对每个候选分隔符,统计**样本行**中它在引号外出现的次数,
 //! 「每行出现次数一致且大于 0」的候选最可能是真正的分隔符 —— 因为表格是规整的。
 
-/// 候选分隔符,按优先级排列(用于同分时的兜底选择)。
-pub const CANDIDATES: [u8; 4] = *b",\t;|";
+/// 候选分隔符 —— 定义在 [`crate::format`](识别入口),这里转发。
+pub use crate::format::CANDIDATES;
 
 /// 默认分隔符。
 pub const DEFAULT_DELIMITER: u8 = b',';

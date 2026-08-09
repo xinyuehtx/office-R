@@ -1487,27 +1487,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn serial_to_date_basic() {
-        // 25569 = 1970-01-01;44197 = 2021-01-01
-        assert_eq!(crate::serial::serial_to_string(25569.0), "1970-01-01");
-        assert_eq!(crate::serial::serial_to_string(44197.0), "2021-01-01");
-        // 1900 年初:复刻闰年 bug 后 serial 1 = 1900-01-01、2 = 1900-01-02
-        // (此前 xlsx 侧用朴素的 serial - 25569,这一段整体早一天)
-        assert_eq!(crate::serial::serial_to_string(1.0), "1900-01-01");
-        assert_eq!(crate::serial::serial_to_string(2.0), "1900-01-02");
-        assert_eq!(crate::serial::serial_to_string(60.0), "1900-02-29");
-    }
-
-    #[test]
-    fn serial_to_date_with_time() {
-        // 44197.5 = 2021-01-01 12:00:00
-        assert_eq!(
-            crate::serial::serial_to_string(44197.5),
-            "2021-01-01 12:00:00"
-        );
-    }
-
-    #[test]
     fn cell_text_variants() {
         assert_eq!(cell_text(&Data::Empty), "");
         assert_eq!(cell_text(&Data::Int(42)), "42");
