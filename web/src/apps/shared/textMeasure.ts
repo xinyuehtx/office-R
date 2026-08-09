@@ -121,10 +121,9 @@ export class TextMeasurer {
           current = candidate;
           continue;
         }
-        // 放不下:先把已有内容收行
+        // 放不下:先把已有内容收行(下面两个分支都会重新给 current 赋值)
         if (current !== "") {
           lines.push(current);
-          current = "";
         }
         // 单个 token 仍放不下 → 按字符硬断
         if (this.measure(token, font) > maxWidth) {

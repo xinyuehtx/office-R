@@ -766,6 +766,25 @@ impl<'a> Evaluator<'a> {
         self.eval(node).to_bool()
     }
 
+    /// 展开一个范围为逐格值,**带元素数上限**。
+    ///
+    /// `=SUM(A1:XFD1048576)` 是合法写法,展开却是 172 亿格。早先这里算
+    /// `range.rows() * range.cols()` —— 两个 u32 相乘先溢出回绕成 0,
+    /// `with_capacity(0)` 之后再一路 push 到内存耗尽。所以先用 u64 判面积。
+    fn flatten_range(&mut self, range: RangeRef) -> Vec<Value> {
+        let area = crate::limits::area(range.rows(), range.cols());
+        if area > crate::limits::MAX_ARRAY_ELEMS {
+            return vec![Value::Error(ExcelError::Num)];
+        }
+        let mut out = Vec::with_capacity(area as usize);
+        for r in range.row0..=range.row1 {
+            for c in range.col0..=range.col1 {
+                out.push(self.cell_value(r, c));
+            }
+        }
+        out
+    }
+
     /// 把一个参数「摊平」成值序列:
     /// - 范围 → 逐格的值;
     /// - 数组 → 其元素;
@@ -774,26 +793,10 @@ impl<'a> Evaluator<'a> {
     /// 聚合函数据此遍历,再按各自规则(是否计入文本/布尔)取舍。
     pub fn flatten_arg(&mut self, node: &Node) -> Vec<Value> {
         match node {
-            Node::Range(range) => {
-                let mut out = Vec::with_capacity((range.rows() * range.cols()) as usize);
-                for r in range.row0..=range.row1 {
-                    for c in range.col0..=range.col1 {
-                        out.push(self.cell_value(r, c));
-                    }
-                }
-                out
-            }
+            Node::Range(range) => self.flatten_range(*range),
             // 具名区域:展开为其目标范围的逐格值
             Node::Name(name) => match self.wb.names.get(name).copied() {
-                Some(range) => {
-                    let mut out = Vec::with_capacity((range.rows() * range.cols()) as usize);
-                    for r in range.row0..=range.row1 {
-                        for c in range.col0..=range.col1 {
-                            out.push(self.cell_value(r, c));
-                        }
-                    }
-                    out
-                }
+                Some(range) => self.flatten_range(range),
                 None => vec![Value::Error(ExcelError::Name)],
             },
             other => match self.eval(other) {

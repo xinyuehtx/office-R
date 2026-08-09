@@ -72,6 +72,11 @@ jobs:
       - name: 单元测试
         run: cargo test --all --locked
 
+      # 夹具是入库的(clone 即可跑 e2e;git bisect 时拿到的是那个 commit 的夹具),
+      # 这里校验它们没有与生成器脱节 —— 三个生成器都是确定性的,可逐字节比对。
+      - name: 校验 e2e 夹具未漂移
+        run: cargo run -p xtask --locked -- fixtures --check web/e2e/fixtures
+
   web:
     name: Web 视图层(typecheck / test / build)
     runs-on: ubuntu-latest
@@ -104,6 +109,9 @@ jobs:
       - name: 类型检查
         run: pnpm -C web typecheck
 
+      - name: Lint
+        run: pnpm -C web lint
+
       - name: 单元测试
         run: pnpm -C web test
 
@@ -124,14 +132,7 @@ jobs:
           name: wasm-pkg
           path: web/src/wasm/pkg
 
-      # 夹具由 Rust 内核构造,故此 job 仍需原生工具链。
-      # TODO: 改为「入库夹具 + rust job 里做漂移校验」后即可去掉(见 docs/architecture.md)
-      - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: 缓存 cargo
-        uses: Swatinem/rust-cache@v2
-
+      # 夹具已入库,漂移由 rust job 校验 —— 此 job 完全不需要 Rust 工具链。
       - name: 安装 pnpm
         uses: pnpm/action-setup@v6
         with:
@@ -146,9 +147,6 @@ jobs:
 
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
-
-      - name: 生成 e2e 夹具(从 Rust 内核构造 docx/xlsx/pptx)
-        run: pnpm -C web e2e:fixtures
 
       - name: 安装 Playwright 浏览器(chromium)
         run: pnpm -C web exec playwright install --with-deps chromium

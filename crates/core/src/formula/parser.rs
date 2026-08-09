@@ -7,6 +7,8 @@
 //! Excel 优先级(高 → 低):
 //! `:`(范围) > 一元 `-`/`+` > `%`(后缀) > `^` > `* /` > `+ -` > `&` > 比较。
 
+use crate::limits::MAX_PARSE_DEPTH;
+
 use super::ast::{BinOp, Node, UnOp};
 use super::reference::{CellRef, RangeRef};
 use super::token::{tokenize, Token};
@@ -15,7 +17,11 @@ use super::value::ExcelError;
 /// 把公式主体(不含前导 `=`)解析成 AST。
 pub fn parse(input: &str) -> Result<Node, ExcelError> {
     let tokens = tokenize(input)?;
-    let mut p = Parser { tokens, pos: 0 };
+    let mut p = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     let node = p.parse_expr(0)?;
     if p.pos != p.tokens.len() {
         // 还有没消费完的记号 → 语法错误
@@ -27,6 +33,8 @@ pub fn parse(input: &str) -> Result<Node, ExcelError> {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// 当前递归深度。见 [`Parser::parse_expr`]。
+    depth: u32,
 }
 
 impl Parser {
@@ -51,8 +59,23 @@ impl Parser {
         }
     }
 
-    /// 优先级爬升主循环。`min_bp` 是当前允许的最小左绑定力。
+    /// 优先级爬升主循环(带深度守卫)。
+    ///
+    /// 解析是递归下降的:`=((((…1…))))` 或 `=-----…1` 会按嵌套层数吃原生栈,
+    /// 十万层就能让 WASM 直接 trap。求值侧的 `MAX_DEPTH` 拦不住这个 ——
+    /// 它在解析**之后**才生效。超限按 `#NUM!` 处理,与求值侧同语义。
     fn parse_expr(&mut self, min_bp: u8) -> Result<Node, ExcelError> {
+        if self.depth >= MAX_PARSE_DEPTH {
+            return Err(ExcelError::Num);
+        }
+        self.depth += 1;
+        let r = self.parse_expr_inner(min_bp);
+        self.depth -= 1;
+        r
+    }
+
+    /// `min_bp` 是当前允许的最小左绑定力。
+    fn parse_expr_inner(&mut self, min_bp: u8) -> Result<Node, ExcelError> {
         let mut lhs = self.parse_prefix()?;
 
         // 克隆当前记号以脱离对 self 的借用,便于循环体内推进 self.pos。

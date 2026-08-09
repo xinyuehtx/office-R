@@ -245,9 +245,14 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
             .filter_map(|(r, c, kind, f)| {
                 let range = f.rsplit('!').next().unwrap_or(&f).replace('$', "");
                 let (r0, c0, r1, c1) = parse_a1_range(&range)?;
+                // 取值数上限:前端把迷你图画进一格大小的框里,几千个点已远超可辨识密度;
+                // 而 <xm:f> 里写 Sheet1!A1:A1048576 是合法的。
                 let mut values = Vec::new();
-                for rr in r0..=r1 {
+                'rows: for rr in r0..=r1 {
                     for cc in c0..=c1 {
+                        if values.len() >= crate::limits::MAX_SPARKLINE_VALUES {
+                            break 'rows;
+                        }
                         let v = sheet
                             .cell(rr as usize, cc as usize)
                             .trim()
@@ -587,6 +592,15 @@ fn build_sheet(
         // 空表
         return (builder.finish(), formula_list);
     };
+    // 维度钳制:一个几百字节的 xlsx 只要写一个 <c r="XFD1048576"/> 就能让
+    // 这两层循环压进 172 亿个空串。按 Excel 上限 + 总格数预算截断,
+    // 与 CSV 的 truncatedRows 同思路 —— 用户通常只想看前面几屏。
+    let end_col = end_col.min(crate::limits::MAX_COL);
+    let mut end_row = end_row.min(crate::limits::MAX_ROW);
+    let max_rows = crate::limits::MAX_SHEET_CELLS / u64::from(end_col + 1);
+    if u64::from(end_row) + 1 > max_rows {
+        end_row = max_rows.saturating_sub(1) as u32;
+    }
 
     for r in 0..=end_row {
         builder.start_row();
@@ -641,7 +655,7 @@ fn cell_text(data: &Data) -> String {
             }
         }
         // calamine 的 DateTime Display 只打印裸序列数,这里换算成日期文本。
-        Data::DateTime(dt) => excel_serial_to_string(dt.as_f64()),
+        Data::DateTime(dt) => crate::serial::serial_to_string(dt.as_f64()),
         Data::DateTimeIso(s) => s.clone(),
         Data::DurationIso(s) => s.clone(),
         Data::Error(e) => format!("#{e:?}"),
@@ -1138,10 +1152,12 @@ fn read_cell_styles(zip: &mut ZipArchive<Cursor<Vec<u8>>>, path: &str) -> SheetG
                             attr(&e, "max").and_then(|s| s.parse::<u32>().ok()),
                             attr(&e, "width").and_then(|s| s.parse::<f64>().ok()),
                         ) {
-                            for c in min..=max.min(min + 16_384) {
-                                if c >= 1 {
-                                    g.col_widths.insert(c - 1, w);
-                                }
+                            // min 未校验:min="4294967295" 时 `min + 16_384` 会溢出
+                            // (debug panic / release 回绕成空区间,静默丢列宽)。
+                            // 用 saturating_add 并按 Excel 列上限收口。
+                            let hi = max.min(min.saturating_add(1024)).min(MAX_COL_1BASED);
+                            for c in min.max(1)..=hi {
+                                g.col_widths.insert(c - 1, w);
                             }
                         }
                     }
@@ -1302,6 +1318,13 @@ fn expand_sqref(sqref: &str) -> Vec<(u32, u32)> {
     let mut out = Vec::new();
     for part in sqref.split_whitespace() {
         if let Some((r0, c0, r1, c1)) = parse_a1_range(part) {
+            // 「全选 + 条件格式」在 Excel 里生成 sqref="A1:XFD1048576" —— 这是真实
+            // 文件形态,逐格展开是 172 亿个 (u32, u32) ≈ 137 GB。超限就整块跳过:
+            // 与其为了一条覆盖全表的规则耗尽内存,不如放弃这条规则的着色。
+            let area = crate::limits::area(r1 - r0 + 1, c1 - c0 + 1);
+            if area > crate::limits::MAX_CF_CELLS as u64 {
+                continue;
+            }
             for r in r0..=r1 {
                 for c in c0..=c1 {
                     out.push((r, c));
@@ -1309,6 +1332,9 @@ fn expand_sqref(sqref: &str) -> Vec<(u32, u32)> {
             }
         } else if let Some(rc) = parse_a1(part) {
             out.push(rc);
+        }
+        if out.len() >= crate::limits::MAX_CF_CELLS {
+            break;
         }
     }
     out
@@ -1425,18 +1451,28 @@ fn parse_a1(s: &str) -> Option<(u32, u32)> {
     let mut i = 0;
     let mut col = 0u32;
     while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
-        col = col * 26 + (bytes[i].to_ascii_uppercase() - b'A' + 1) as u32;
+        // checked_*:`r="AAAAAAAAAA1"` 会让乘法溢出(debug panic /
+        // release 回绕成任意列号,再被当作 merges/styles 的键用)
+        col = col
+            .checked_mul(26)?
+            .checked_add((bytes[i].to_ascii_uppercase() - b'A' + 1) as u32)?;
+        if col > MAX_COL_1BASED {
+            return None;
+        }
         i += 1;
     }
     if i == 0 || col == 0 {
         return None;
     }
     let row: u32 = s[i..].parse().ok()?;
-    if row == 0 {
+    if row == 0 || row > crate::limits::MAX_ROW + 1 {
         return None;
     }
     Some((row - 1, col - 1))
 }
+
+/// 1 基的列号上限(XFD = 16384),供 A1 解析与 `<col>` 收口共用。
+const MAX_COL_1BASED: u32 = crate::limits::MAX_COL + 1;
 
 /// `A1:B2` → (row0, col0, row1, col1)(0 基,归一)。
 fn parse_a1_range(s: &str) -> Option<(u32, u32, u32, u32)> {
@@ -1446,50 +1482,6 @@ fn parse_a1_range(s: &str) -> Option<(u32, u32, u32, u32)> {
     Some((r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1)))
 }
 
-/// Excel 日期**序列数** → `YYYY-MM-DD`(有时分秒则追加 ` HH:MM:SS`)。
-///
-/// Excel 纪元为 1899-12-30(1900 系统),整数部分为天、其余为当天时间比例。
-/// 用 Howard Hinnant 的 civil-from-days 算法换算,不依赖 chrono。
-fn excel_serial_to_string(serial: f64) -> String {
-    let whole = serial.floor();
-    let days_since_1970 = whole as i64 - 25569; // 1899-12-30 → 1970-01-01 相差 25569 天
-    let (y, m, d) = civil_from_days(days_since_1970);
-
-    // 当天时间(四舍五入到秒)
-    let secs = ((serial - whole) * 86_400.0).round() as i64;
-    let (secs, extra_day) = if secs >= 86_400 {
-        (secs - 86_400, 1)
-    } else {
-        (secs, 0)
-    };
-    let (y, m, d) = if extra_day == 1 {
-        civil_from_days(days_since_1970 + 1)
-    } else {
-        (y, m, d)
-    };
-    let (hh, mm, ss) = (secs / 3600, (secs % 3600) / 60, secs % 60);
-
-    if hh == 0 && mm == 0 && ss == 0 {
-        format!("{y:04}-{m:02}-{d:02}")
-    } else {
-        format!("{y:04}-{m:02}-{d:02} {hh:02}:{mm:02}:{ss:02}")
-    }
-}
-
-/// 天数(自 1970-01-01)→ (年, 月, 日)。Hinnant civil_from_days。
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
-    (y + if m <= 2 { 1 } else { 0 }, m, d)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1497,16 +1489,22 @@ mod tests {
     #[test]
     fn serial_to_date_basic() {
         // 25569 = 1970-01-01;44197 = 2021-01-01
-        assert_eq!(excel_serial_to_string(25569.0), "1970-01-01");
-        assert_eq!(excel_serial_to_string(44197.0), "2021-01-01");
-        // 1 = 1899-12-31(1900 系统,忽略闰年 bug 的边界)
-        assert_eq!(excel_serial_to_string(2.0), "1900-01-01");
+        assert_eq!(crate::serial::serial_to_string(25569.0), "1970-01-01");
+        assert_eq!(crate::serial::serial_to_string(44197.0), "2021-01-01");
+        // 1900 年初:复刻闰年 bug 后 serial 1 = 1900-01-01、2 = 1900-01-02
+        // (此前 xlsx 侧用朴素的 serial - 25569,这一段整体早一天)
+        assert_eq!(crate::serial::serial_to_string(1.0), "1900-01-01");
+        assert_eq!(crate::serial::serial_to_string(2.0), "1900-01-02");
+        assert_eq!(crate::serial::serial_to_string(60.0), "1900-02-29");
     }
 
     #[test]
     fn serial_to_date_with_time() {
         // 44197.5 = 2021-01-01 12:00:00
-        assert_eq!(excel_serial_to_string(44197.5), "2021-01-01 12:00:00");
+        assert_eq!(
+            crate::serial::serial_to_string(44197.5),
+            "2021-01-01 12:00:00"
+        );
     }
 
     #[test]
@@ -1854,13 +1852,5 @@ mod tests {
         let mid = fill_at(1, 1).unwrap();
         assert_ne!(mid, "FF0000");
         assert_ne!(mid, "00FF00");
-    }
-
-    #[test]
-    #[ignore = "生成浏览器 e2e 夹具"]
-    fn write_browser_fixture() {
-        let bytes = tiny_xlsx();
-        std::fs::write("/tmp/office-r-sample.xlsx", &bytes).unwrap();
-        eprintln!("wrote /tmp/office-r-sample.xlsx ({} bytes)", bytes.len());
     }
 }

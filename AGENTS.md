@@ -16,7 +16,7 @@ office-R 是一个**统一的 Office 三件套应用**(文档 Word / 表格 Exce
 - **表格页(本期重点)**:上传 **CSV** → WASM 解析(编码探测 / 分隔符嗅探 / 列切分)→ **canvas 表格视图**,支持滚动、缩放、键盘与拖拽。视图由**三张堆叠的 canvas** 组成(单元格 / 表头 / 覆盖层),叠加交给浏览器合成器用 GPU 完成;单元格层是超出视口一圈的瓦片,多数滚动帧只改 CSS transform、主线程零绘制。50 万行流畅浏览。见 [RFC-0003](./docs/rfcs/0003-csv-canvas-grid.md)。
 - **表格数据源:CSV + .xlsx**:CSV 走 Worker 紧凑缓冲解析;**.xlsx** 由 `core/xlsx.rs`(calamine)解析成**多工作表**(显示缓存计算值、公式栏回显原文、日期序列数自换算),`WasmWorkbook` 暴露、`ExcelPage` 按扩展名路由并提供**工作表标签切换**。
 - **列过滤 + 排序 + 冻结行列 + 数字格式化 + 区域选择/复制/列宽拖拽(视图层)**:列过滤(文本/数值/值集/空白,多列 AND)与**排序**(数值感知、空值靠后、稳定)复合在 `crates/core/src/filter.rs`,`WasmSheet` 持「可视行→底层行」映射(可视行连续 `0..V`,渲染几何复用);**冻结行列**在 `GridLayout` 记录冻结跨度,冻结时走四象限全量重绘隔离路径;**区域选择**(Shift+点击/方向键)+ **复制 TSV**(Ctrl/⌘+C)+ **列宽拖拽**(`colWidthOverrides`)+ **查找**(Ctrl/⌘+F,受过滤/排序影响);**数字格式化** `core/numfmt.rs`。见 [RFC-0005](./docs/rfcs/0005-view-filter-freeze.md) / [RFC-0006](./docs/rfcs/0006-word-excel-ppt-readonly.md)。
-- **公式计算引擎(Rust 侧)**:以 `=` 开头的单元格按 **Excel 语义**求值(词法 → 语法 → 求值 + 值层 `Workbook`),对齐 Excel 的运算符优先级、错误值(`#DIV/0!` 等)、类型强制与循环检测,内置 **150+ 函数**(math/stats/logical/text/date/lookup/info/financial/engineering/dynamic),含**跨工作表引用** `Sheet!A1`、**具名区域** `define_name`。之上是**计算管线**:依赖图(前驱/后继)+ 脏区跟踪 + 拓扑序增量重算(计算合并)+ 循环更新策略(默认 `#REF!`,可开启 Jacobi 迭代计算)。表格页显示计算值、公式栏回显原始公式。参考 HyperFormula / Univer 的函数目录,Rust 自研。见 [RFC-0004](./docs/rfcs/0004-formula-engine.md)。
+- **公式计算引擎(Rust 侧)**:以 `=` 开头的单元格按 **Excel 语义**求值(词法 → 语法 → 求值 + 值层 `Workbook`),对齐 Excel 的运算符优先级、错误值(`#DIV/0!` 等)、类型强制与循环检测,内置 **160+ 函数**(math/stats/logical/text/date/lookup/info/financial/engineering/dynamic;准确数量以 `formula::functions::count()` 为准,别在文档里写死),含**跨工作表引用** `Sheet!A1`、**具名区域** `define_name`。之上是**计算管线**:依赖图(前驱/后继)+ 脏区跟踪 + 拓扑序增量重算(计算合并)+ 循环更新策略(默认 `#REF!`,可开启 Jacobi 迭代计算)。表格页显示计算值、公式栏回显原始公式。参考 HyperFormula / Univer 的函数目录,Rust 自研。见 [RFC-0004](./docs/rfcs/0004-formula-engine.md)。
 - **文档页(Word 只读)**:`core/docx.rs` 用 docx-rs 读路径抽出平面化模型(段落/标题/对齐/**有序无序列表(查 numbering.xml)**/图片/表格/**分栏 sectPr、页眉页脚、修订 ins/del**),`web/word` 流式布局 + sticky canvas 纵向虚拟化渲染(文字/加粗斜体/颜色/对齐含**两端对齐**/列表/图文混排/表格/**分栏贪心分配、页眉页脚分隔线、修订着色+删除线**)。见 [RFC-0006](./docs/rfcs/0006-word-excel-ppt-readonly.md)。
 - **演示页(PPT 只读)**:`core/pptx.rs` 用 zip+quick-xml 直接解析 PresentationML → 幻灯模型(文本框/图片/自选图形/对齐,EMU÷9525,**占位符继承版式/母版几何**、**主题 schemeClr**、**旋转/翻转**、**母版文本默认样式继承**、**组合形状/渐变/内嵌表格/内嵌图表**、**graphicFrame SmartArt 占位**、**timing/transition 动画时间线**(`clickEffect` → 形状 `appear_step` + `build_steps`,切换类型 `transition`)),`web/ppt` canvas 渲染(含旋转仿射、真实表格/图表、SmartArt 虚线占位、动画/切换徽标) + 缩略图导航 + 缩放 + **全屏演示模式**(逐步播放入场动画 + 切换效果)。见 [RFC-0006](./docs/rfcs/0006-word-excel-ppt-readonly.md)。
 - **Excel 数字格式化(numfmt)**:支持四段 `正;负;零;文本`、占位符/千分位/百分比/货币/小数,以及**颜色码 `[Red]`、条件段 `[>=100]`、分数 `?/?`**。
@@ -49,7 +49,7 @@ web/ (React 视图)  ──wasm-bindgen──▶  crates/wasm (绑定)  ──�
 ## 目录结构
 
 ```
-crates/core/        Rust 计算内核(format/sheet/csv/formula/filter/numfmt/chart/docx/xlsx/pptx)
+crates/core/        Rust 计算内核(format/sheet/csv/formula/filter/numfmt/chart/serial/limits/docx/xlsx/pptx)
   src/formula/      公式引擎:token/parser/ast/eval + functions/(math/stats/logical/…)
   src/filter.rs     列过滤:条件 → 命中行下标(供视图层行映射)
   src/numfmt.rs     Excel 数字格式码 → 显示文本
@@ -115,7 +115,7 @@ pnpm -C web e2e                  # 浏览器 e2e(Playwright chromium)
 ### 提交前检查清单(强制)
 
 - [ ] `cargo fmt --check`、`cargo clippy -D warnings`、`cargo test` 通过
-- [ ] `pnpm -C web typecheck && pnpm -C web test && pnpm -C web build` 通过
+- [ ] `pnpm -C web typecheck && pnpm -C web lint && pnpm -C web test && pnpm -C web build` 通过
 - [ ] **更新项目网站**:功能变化已反映到 `web/`,`pnpm -C web dev` 验证可用
 - [ ] **更新架构文档**:变化已同步到 [docs/architecture.md](./docs/architecture.md) 与本文件
 - [ ] 相关 RFC / Spec / Story 已同步

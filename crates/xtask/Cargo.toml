@@ -1,0 +1,15 @@
+[package]
+name = "xtask"
+description = "仓库开发工具:生成/校验浏览器 e2e 夹具"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# docx 夹具用 docx-rs 的**写**路径构造(内核只用读路径);
+# image 特性是 Pic::new 需要的 —— 放在这里而不是 core 的 dev-dependencies,
+# 于是 `cargo test` 不再为了造 3 个几 KB 的文件去编译一整套位图解码。
+docx-rs = { version = "0.4.22", features = ["image"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }

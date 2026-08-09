@@ -25,6 +25,8 @@ use office_core::Sheet;
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
+use crate::xlsx_dto::{ChartDto, ImageDto, SparklineDto, StyleDto};
+
 use crate::log::{self, Level};
 
 /// 解析产出的紧凑缓冲,准备跨线程转移。
@@ -542,6 +544,20 @@ pub struct WasmWorkbook {
     media: Vec<office_core::xlsx::XlsxMedia>,
 }
 
+impl WasmWorkbook {
+    /// 按下标取工作表,越界给出可读错误。
+    fn sheet_at(&self, i: usize) -> Result<&office_core::xlsx::XlsxSheet, JsValue> {
+        self.sheets
+            .get(i)
+            .ok_or_else(|| JsValue::from_str("工作表下标越界"))
+    }
+}
+
+/// 序列化成 JS 值(结构体 → 普通对象,元组/Vec → 数组)。
+fn to_js<T: serde::Serialize>(v: &T) -> Result<JsValue, JsValue> {
+    serde_wasm_bindgen::to_value(v).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
 #[wasm_bindgen]
 impl WasmWorkbook {
     /// 解析 xlsx 字节为工作簿句柄。
@@ -567,216 +583,65 @@ impl WasmWorkbook {
 
     /// 取第 `i` 张工作表为可同步取数的表格句柄(克隆其只读表)。
     pub fn sheet(&self, i: usize) -> Result<WasmSheet, JsValue> {
-        let s = self
-            .sheets
-            .get(i)
-            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
-        Ok(WasmSheet::from_sheet(s.sheet.clone()))
+        Ok(WasmSheet::from_sheet(self.sheet_at(i)?.sheet.clone()))
     }
 
     /// 第 `i` 张工作表的公式清单 `[{row, col, formula}, ...]`。
     pub fn formulas(&self, i: usize) -> Result<JsValue, JsValue> {
-        let s = self
-            .sheets
-            .get(i)
-            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
-        formulas_to_js(&s.formulas)
+        formulas_to_js(&self.sheet_at(i)?.formulas)
     }
 
-    /// 第 `i` 张工作表的非默认单元格样式 `[{row,col,bold,italic,color,fill,align}, ...]`。
+    /// 第 `i` 张工作表的非默认单元格样式 `[{row,col,bold,italic,color?,fill?,align?,border?}, ...]`。
     pub fn styles(&self, i: usize) -> Result<JsValue, JsValue> {
-        let s = self
-            .sheets
-            .get(i)
-            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
-        let arr = js_sys::Array::new();
-        for (row, col, f) in &s.formats {
-            let o = js_sys::Object::new();
-            js_sys::Reflect::set(&o, &"row".into(), &JsValue::from_f64(*row as f64))?;
-            js_sys::Reflect::set(&o, &"col".into(), &JsValue::from_f64(*col as f64))?;
-            js_sys::Reflect::set(&o, &"bold".into(), &JsValue::from_bool(f.bold))?;
-            js_sys::Reflect::set(&o, &"italic".into(), &JsValue::from_bool(f.italic))?;
-            if let Some(c) = &f.color {
-                js_sys::Reflect::set(&o, &"color".into(), &JsValue::from_str(c))?;
-            }
-            if let Some(c) = &f.fill {
-                js_sys::Reflect::set(&o, &"fill".into(), &JsValue::from_str(c))?;
-            }
-            if let Some(a) = &f.align {
-                js_sys::Reflect::set(&o, &"align".into(), &JsValue::from_str(a))?;
-            }
-            if let Some(b) = &f.border {
-                // border: { top?:{w,color}, right?, bottom?, left? }
-                let bo = js_sys::Object::new();
-                let set_side = |name: &str,
-                                side: &Option<office_core::xlsx::BorderSide>|
-                 -> Result<(), JsValue> {
-                    if let Some(sd) = side {
-                        let so = js_sys::Object::new();
-                        js_sys::Reflect::set(&so, &"w".into(), &JsValue::from_f64(sd.width))?;
-                        js_sys::Reflect::set(&so, &"color".into(), &JsValue::from_str(&sd.color))?;
-                        js_sys::Reflect::set(&bo, &name.into(), &so)?;
-                    }
-                    Ok(())
-                };
-                set_side("top", &b.top)?;
-                set_side("right", &b.right)?;
-                set_side("bottom", &b.bottom)?;
-                set_side("left", &b.left)?;
-                js_sys::Reflect::set(&o, &"border".into(), &bo)?;
-            }
-            arr.push(&o);
-        }
-        Ok(arr.into())
+        let s = self.sheet_at(i)?;
+        let dto: Vec<_> = s
+            .formats
+            .iter()
+            .map(|(row, col, f)| StyleDto::new(*row, *col, f))
+            .collect();
+        to_js(&dto)
     }
 
     /// 第 `i` 张工作表的合并区 `[[r0,c0,r1,c1], ...]`。
     pub fn merges(&self, i: usize) -> Result<JsValue, JsValue> {
-        let s = self
-            .sheets
-            .get(i)
-            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
-        let arr = js_sys::Array::new();
-        for &(r0, c0, r1, c1) in &s.merges {
-            let m = js_sys::Array::new();
-            for v in [r0, c0, r1, c1] {
-                m.push(&JsValue::from_f64(v as f64));
-            }
-            arr.push(&m);
-        }
-        Ok(arr.into())
+        to_js(&self.sheet_at(i)?.merges)
     }
 
     /// 第 `i` 张工作表的内嵌图片锚点
     /// `[{mediaKey, fromRow, fromCol, toRow?, toCol?, extW?, extH?}, ...]`。
     pub fn images(&self, i: usize) -> Result<JsValue, JsValue> {
-        let s = self
-            .sheets
-            .get(i)
-            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
-        let arr = js_sys::Array::new();
-        for img in &s.images {
-            let o = js_sys::Object::new();
-            js_sys::Reflect::set(&o, &"mediaKey".into(), &JsValue::from_str(&img.media_key))?;
-            js_sys::Reflect::set(
-                &o,
-                &"fromRow".into(),
-                &JsValue::from_f64(img.from_row as f64),
-            )?;
-            js_sys::Reflect::set(
-                &o,
-                &"fromCol".into(),
-                &JsValue::from_f64(img.from_col as f64),
-            )?;
-            if let Some((tr, tc)) = img.to {
-                js_sys::Reflect::set(&o, &"toRow".into(), &JsValue::from_f64(tr as f64))?;
-                js_sys::Reflect::set(&o, &"toCol".into(), &JsValue::from_f64(tc as f64))?;
-            }
-            if let Some((w, h)) = img.ext_px {
-                js_sys::Reflect::set(&o, &"extW".into(), &JsValue::from_f64(w))?;
-                js_sys::Reflect::set(&o, &"extH".into(), &JsValue::from_f64(h))?;
-            }
-            arr.push(&o);
-        }
-        Ok(arr.into())
+        let dto: Vec<ImageDto> = self.sheet_at(i)?.images.iter().map(Into::into).collect();
+        to_js(&dto)
     }
 
     /// 第 `i` 张工作表的内嵌图表
-    /// `[{fromRow,fromCol,toRow?,toCol?,kind,series:[[..]],categories:[..],title?}, ...]`。
+    /// `[{fromRow,fromCol,toRow?,toCol?,kind,series,categories,title?}, ...]`。
     pub fn charts(&self, i: usize) -> Result<JsValue, JsValue> {
-        let s = self
-            .sheets
-            .get(i)
-            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
-        let arr = js_sys::Array::new();
-        for ch in &s.charts {
-            let o = js_sys::Object::new();
-            js_sys::Reflect::set(
-                &o,
-                &"fromRow".into(),
-                &JsValue::from_f64(ch.from_row as f64),
-            )?;
-            js_sys::Reflect::set(
-                &o,
-                &"fromCol".into(),
-                &JsValue::from_f64(ch.from_col as f64),
-            )?;
-            if let Some((tr, tc)) = ch.to {
-                js_sys::Reflect::set(&o, &"toRow".into(), &JsValue::from_f64(tr as f64))?;
-                js_sys::Reflect::set(&o, &"toCol".into(), &JsValue::from_f64(tc as f64))?;
-            }
-            js_sys::Reflect::set(&o, &"kind".into(), &JsValue::from_str(&ch.kind))?;
-            if let Some(t) = &ch.title {
-                js_sys::Reflect::set(&o, &"title".into(), &JsValue::from_str(t))?;
-            }
-            let series = js_sys::Array::new();
-            for ser in &ch.series {
-                let a = js_sys::Array::new();
-                for &v in ser {
-                    a.push(&JsValue::from_f64(v));
-                }
-                series.push(&a);
-            }
-            js_sys::Reflect::set(&o, &"series".into(), &series)?;
-            let cats = js_sys::Array::new();
-            for c in &ch.categories {
-                cats.push(&JsValue::from_str(c));
-            }
-            js_sys::Reflect::set(&o, &"categories".into(), &cats)?;
-            arr.push(&o);
-        }
-        Ok(arr.into())
+        let dto: Vec<ChartDto> = self.sheet_at(i)?.charts.iter().map(Into::into).collect();
+        to_js(&dto)
     }
 
     /// 第 `i` 张工作表的列宽覆盖 `[[col, excelWidth], ...]`(Excel 字符宽度)。
     #[wasm_bindgen(js_name = colWidths)]
     pub fn col_widths(&self, i: usize) -> Result<JsValue, JsValue> {
-        let s = self
-            .sheets
-            .get(i)
-            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
-        let arr = js_sys::Array::new();
-        for &(c, w) in &s.col_widths {
-            let pair = js_sys::Array::new();
-            pair.push(&JsValue::from_f64(c as f64));
-            pair.push(&JsValue::from_f64(w));
-            arr.push(&pair);
-        }
-        Ok(arr.into())
+        to_js(&self.sheet_at(i)?.col_widths)
     }
 
-    /// 第 `i` 张工作表的迷你图 `[{row,col,kind,values:[..]}, ...]`。
+    /// 第 `i` 张工作表的迷你图 `[{row,col,kind,values}, ...]`。
     pub fn sparklines(&self, i: usize) -> Result<JsValue, JsValue> {
-        let s = self
-            .sheets
-            .get(i)
-            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
-        let arr = js_sys::Array::new();
-        for sp in &s.sparklines {
-            let o = js_sys::Object::new();
-            js_sys::Reflect::set(&o, &"row".into(), &JsValue::from_f64(sp.row as f64))?;
-            js_sys::Reflect::set(&o, &"col".into(), &JsValue::from_f64(sp.col as f64))?;
-            js_sys::Reflect::set(&o, &"kind".into(), &JsValue::from_str(&sp.kind))?;
-            let vals = js_sys::Array::new();
-            for &v in &sp.values {
-                vals.push(&JsValue::from_f64(v));
-            }
-            js_sys::Reflect::set(&o, &"values".into(), &vals)?;
-            arr.push(&o);
-        }
-        Ok(arr.into())
+        let dto: Vec<SparklineDto> = self
+            .sheet_at(i)?
+            .sparklines
+            .iter()
+            .map(Into::into)
+            .collect();
+        to_js(&dto)
     }
 
     /// 第 `i` 张工作表的冻结窗格 `[rows, cols]`。
     pub fn freeze(&self, i: usize) -> Result<JsValue, JsValue> {
-        let s = self
-            .sheets
-            .get(i)
-            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
-        let arr = js_sys::Array::new();
-        arr.push(&JsValue::from_f64(s.freeze_rows as f64));
-        arr.push(&JsValue::from_f64(s.freeze_cols as f64));
-        Ok(arr.into())
+        let s = self.sheet_at(i)?;
+        to_js(&(s.freeze_rows, s.freeze_cols))
     }
 
     /// 媒体(图片)数量。

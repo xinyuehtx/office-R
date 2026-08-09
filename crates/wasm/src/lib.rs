@@ -8,6 +8,7 @@ mod csv_sheet;
 mod log;
 mod ppt;
 mod word;
+mod xlsx_dto;
 
 pub use csv_sheet::{parse_csv_packed, CellWindow, PackedCsv, WasmSheet, WasmWorkbook};
 pub use log::set_log_level;

@@ -41,7 +41,7 @@ office-R 是一个**统一的 Office 三件套应用**(文档 / 表格 / 演示)
 │  ├─ csv/        CSV 解析:decode(编码)· dialect(分隔符)      │
 │  │              · error(thiserror)· mod(解析主流程)         │
 │  ├─ formula/    公式引擎:token→parser→ast→eval + functions/    │
-│  │              值层 Workbook,对齐 Excel(140+ 函数)          │
+│  │              值层 Workbook,语义对齐 Excel                  │
 │  ├─ filter.rs   列过滤:按列条件全表扫描 → 命中行下标            │
 │  ├─ numfmt.rs   Excel 数字格式码 → 显示文本                      │
 │  ├─ docx.rs     Word:docx-rs 读路径 → 平面化文档模型 + 图片      │
@@ -222,7 +222,8 @@ DOM 只承载:容器、交互层、状态栏,以及供读屏软件播报当前�
   eval.rs    求值:错误传播 + 类型强制 + 范围展开;Workbook 值层承载字面量/公式,
              按需求值 + 记忆化缓存 + 循环检测(环 → #REF!,不 panic/不死循环)
   graph.rs   依赖图:前驱提取 + 范围包含判定 + 拓扑排序(Kahn)
-  functions/ 可扩展注册表:math/stats/logical/text/datetime/lookup/info/financial(140+)
+  functions/ 可扩展注册表:math/stats/logical/text/datetime/lookup/info/financial/
+             engineering/dynamic(实测函数数以 `formula::functions::count()` 为准)
 ```
 
 **计算管线**(编辑后不全表重算):`set_input` 只更新受影响的依赖图边,并把「该格 + 传递后继」
@@ -243,18 +244,58 @@ DOM 只承载:容器、交互层、状态栏,以及供读屏软件播报当前�
 CSV 表格页的落地:含 `=` 单元格的文件由 `formula::evaluate_sheet` 求值,网格显示**计算值**、
 公式栏回显**原始公式**(与 Excel「格显示值、栏显示式」一致)。引擎层还支持**跨工作表引用**
 (`Sheet!A1`,读另一张常量表)与**具名区域**(`define_name`);`.xlsx` 多表数据据此互相引用。
-**非目标**:动态数组溢出、engineering/database/cube 类别。
+**已补齐**:动态数组(FILTER/SORT/UNIQUE/SEQUENCE/XLOOKUP,`dynamic.rs`)与
+`engineering.rs` 类别。**仍非目标**:database/cube 类别、跨工作簿引用。
 
-## 扩展边界(本期刻意不实现)
+## 健壮性:解析资源预算(`crates/core/src/limits.rs`)
 
-`Sheet` 只承载**纯文本单元格** —— CSV 本身也不携带更多信息。后续演进的边界:
+只读查看器面对的是**任意来源**的文件,其中一部分畸形、少数是刻意构造的。
+在 WASM 里这件事的代价比原生程序高一档:一次 panic / OOM 会让整个模块 trap,
+而前端缓存了 init promise —— **用户必须刷新页面才能再打开任何文件**。
+
+CSV 路径一开始就有 `DEFAULT_MAX_BYTES / MAX_ROWS / MAX_COLS`;OOXML 与公式引擎
+此前一个上限都没有。现在统一在 `limits.rs`,在五处入口钳制:
+
+| 位置 | 触发形态 | 不钳制的后果 |
+| --- | --- | --- |
+| `xlsx::build_sheet` | 一个 `<c r="XFD1048576"/>` | 循环压进 172 亿个空串 |
+| `xlsx::expand_sqref` | `sqref="A1:XFD1048576"`(「全选 + 条件格式」的**真实**产物) | 逐格展开 ≈137 GB |
+| `formula::eval::flatten_range` | `=SUM(A1:XFD1048576)` | `rows()*cols()` 在 u32 上回绕成 0,再 push 到内存耗尽 |
+| `formula::parser::parse_expr` | `=((((…1…))))` | 递归下降吃光原生栈(求值侧的 `MAX_DEPTH` 来得太晚) |
+| `dynamic::sequence` | `=SEQUENCE(100000,100000)` | `as usize` 在 wasm32 上截断,循环到 OOM |
+
+原则:**超限给可读错误或截断,绝不 panic**。取值宽到不影响真实文件,窄到不至于耗尽内存。
+
+日期换算同理收口到 `serial.rs`:此前 `numfmt` / `xlsx` / `formula::datetime` 各有一份
+Hinnant 算法,而 `xlsx` 那份用朴素的 `serial - 25569`、**不复刻 1900 闰年 bug** ——
+同一个工作簿里走 numfmt 格式码和走 `Data::DateTime` 的日期在 1900 年初会差一天。
+
+## 开发工具(`crates/xtask`)
+
+`cargo run -p xtask -- fixtures [--check] <目录>` 生成或校验浏览器 e2e 夹具。
+
+夹具**入库**(clone 即可跑 e2e;`git bisect` 时拿到的是那个 commit 的夹具),
+CI 的 `rust` job 用 `--check` 逐字节比对,保证它们不与生成器脱节 ——
+三个生成器都是确定性的(zip 条目时间戳固定),所以字节比对可行。
+
+此前这套逻辑挂在三个 `#[ignore]` 测试上,由 npm script 触发再从 `/tmp` 拷贝:
+`cargo test <过滤器>` 匹配不到测试时退出码仍是 0,后面的 `cp` 会拷走上次遗留的旧文件,
+**拿着陈旧夹具跑出绿灯**。搬进 xtask 后失败即非零退出,且 `docx-rs` 的 `image` 特性
+从 `crates/core` 的 dev-dependencies 移到这里,`cargo test` 不再为它编译一套位图解码。
+
+## 扩展边界(叠层原则)
+
+`Sheet` 只承载**纯文本单元格**。下表原本是「本期刻意不实现」的清单,
+其中多数已按各自的**叠层**方式落地 —— 保留此表是为了记录**加在哪里**的原则,
+而不是记录还没做什么:
 
 | 能力 | 应该加在哪 | 不应该怎么做 |
 | --- | --- | --- |
-| 值类型 / 数字与日期格式化 | 在 `Sheet` **之外**新增「值层 / 格式层」,绘制时查表 | ❌ 把格式化塞进 `Sheet` 或在绘制代码里判断内容像不像日期 |
+| 值类型 / 数字与日期格式化 | ✅ 已实现:`numfmt.rs` 独立格式层 + `serial.rs` 日历,绘制时查表 | ❌ 把格式化塞进 `Sheet` 或在绘制代码里判断内容像不像日期 |
 | 公式求值 | ✅ 已实现:独立的 `formula` 模块([值层 `Workbook`])求值,产出显示表喂给 `Sheet` | ❌ 让渲染管线感知公式 |
-| 图表 | 独立组件,复用 `SheetHandle` 取数 | ❌ 混进表格渲染管线 |
-| xlsx 表格视图 | 新增解析入口产出 `Sheet`,视图层复用 `SheetHandle` 接口,**一行不改** | ❌ 为 xlsx 再写一套渲染 |
+| 图表 | ✅ 已实现:`core/chart.rs` 解析(xlsx/pptx 共用)+ `web/shared/chartDraw.ts` 绘制 | ❌ 混进表格渲染管线 |
+| xlsx 表格视图 | ✅ 已实现:`xlsx.rs` 产出 `Sheet`,视图层复用 `SheetHandle` 接口 | ❌ 为 xlsx 再写一套渲染 |
+| 解析资源预算 | `limits.rs` 统一常量,在各解析入口钳制 | ❌ 各模块各拍一个魔数,或干脆不设上限 |
 
 ## Word / PPT 只读渲染(`crates/core/src/{docx,pptx}.rs` + `web/apps/{word,ppt}`)
 
@@ -285,8 +326,11 @@ office-R/
 │   ├── core/          office-core:平台无关计算内核
 │   │   ├── src/csv/   CSV 解析(decode / dialect / error)
 │   │   ├── src/formula/  公式引擎(token/parser/ast/eval + functions/)
-│   │   └── {filter,numfmt,chart}.rs + {docx,xlsx,pptx}.rs  过滤/numfmt/图表 + 三格式解析
-│   └── wasm/          office-wasm:wasm-bindgen 绑定 + 日志
+│   │   ├── {filter,numfmt,chart,serial}.rs  过滤/numfmt/图表/日期序列数
+│   │   ├── limits.rs  解析资源预算(防畸形文件 OOM / 爆栈)
+│   │   └── {docx,xlsx,pptx}.rs  三种格式的解析入口
+│   ├── wasm/          office-wasm:wasm-bindgen 绑定 + 日志 + xlsx DTO
+│   └── xtask/         开发工具:e2e 夹具生成 / 漂移校验
 ├── web/               React + Vite + TS 视图层(pnpm 管理)
 │   ├── src/apps/      word / excel / ppt 三页 + shared 复用
 │   │   ├── excel/grid/  canvas 表格渲染管线(瓦片/冻结/过滤)
@@ -308,9 +352,9 @@ office-R/
 ### CI 拓扑(`.github/workflows/ci.yml`)
 
 ```
-wasm ──┬─→ web   (typecheck / vitest / vite build)
-       └─→ e2e   (夹具生成 → playwright install → e2e)
-rust      (fmt / clippy --locked / test --locked,与 wasm 并行)
+wasm ──┬─→ web   (typecheck / eslint / vitest / vite build)
+       └─→ e2e   (playwright install → e2e;夹具已入库,不需要 Rust)
+rust      (fmt / clippy --locked / test --locked / 夹具漂移校验,与 wasm 并行)
 ```
 
 `wasm` job **只构建一次**产物并 `upload-artifact`,`web` / `e2e` 下载复用 ——
@@ -322,9 +366,10 @@ release profile 是 `opt-level="z" + lto + codegen-units=1`(最慢一档),
 每 job `timeout-minutes`;e2e 失败时上传 `playwright-report` + `test-results`
 (`trace: on-first-retry` 的产物此前一直被丢弃,CI 上的 flaky 无法排查)。
 
-> `e2e` job 仍装了原生 Rust —— 只因夹具由 `cargo test` 里的生成器构造。
-> 改成「入库夹具 + `rust` job 做漂移校验」后即可去掉。
+前端另有 ESLint 门禁(`web/eslint.config.js`):`react-hooks/exhaustive-deps` 挡
+canvas + hooks 的依赖数组错误,`no-console` 把「禁止裸 console.log」自动化。
+`react-hooks` v7 的编译器系新规则(refs / set-state-in-effect / immutability)
+暂列为 warn 并用 `--max-warnings` 冻结当前条数 —— 它们指向的 render 期写 ref、
+effect 内同步 setState 是真实设计债,该由一次独立重构来还,而不是先把 CI 弄红。
 
-> 改动 `crates/core` 的公共数据结构后**务必重新构建 WASM**:
-> 前端引用的是 `web/src/wasm/pkg` 里的产物,不重建就会拿着旧的二进制跑,
-> 症状往往是「单元格内容错位」这类难以定位的问题。
+> 改动 `crates/core` 的公共数据结构后**务必重新构建 WASM** —— 原因见 [AGENTS.md](../AGENTS.md)。

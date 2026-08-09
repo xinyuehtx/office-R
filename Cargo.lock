@@ -387,6 +387,7 @@ dependencies = [
  "office-core",
  "serde",
  "serde-wasm-bindgen",
+ "serde_json",
  "wasm-bindgen",
 ]
 
@@ -657,6 +658,14 @@ name = "weezl"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
+dependencies = [
+ "docx-rs",
+ "zip",
+]
 
 [[package]]
 name = "zerocopy"

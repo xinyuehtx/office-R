@@ -36,16 +36,11 @@ RFC / Spec / Story 使用四位递增编号,同一功能三者尽量复用同一
 
 ## 提交前检查清单(强制)
 
-每次提交前必须完成:
+清单只有一份,在 [AGENTS.md 的「提交前检查清单」](../AGENTS.md#提交前检查清单强制)。
 
-- [ ] `cargo fmt --check` 与 `cargo clippy -D warnings` 通过
-- [ ] `cargo test` 全绿
-- [ ] `web` 下 `pnpm typecheck && pnpm test && pnpm build` 全绿
-- [ ] **更新项目网站**:功能变化已反映到 Web 视图层(`web/`),本地 `pnpm dev` 验证可用
-- [ ] **更新架构文档**:架构或目录变化已同步到 [`docs/architecture.md`](./architecture.md) 与 [`AGENTS.md`](../AGENTS.md)
-- [ ] 相关 RFC / Spec / Story 已更新到与实现一致的状态
-
-> 「更新项目网站与架构文档」是每次提交的硬性要求 —— 代码、部署页面、架构描述三者不得脱节。
+此前这里抄了一份平行清单,两边已经漂移(一处写 `pnpm -C web typecheck`、
+一处写「`web` 下 `pnpm typecheck`」),而两份都自称「强制」—— 这正是
+「AGENTS.md 是单一事实来源」要避免的情况。
 
 ## 分支与提交
 

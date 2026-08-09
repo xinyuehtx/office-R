@@ -135,10 +135,12 @@ function tokenize(
       tokens.push({ type: "image", id: inline.id, width: w, height: h });
     } else {
       const { font } = runFont(inline, basePx, baseBold);
-      // 切词:CJK 逐字(无空格,靠单字换行),西文按词,空白单独成 token
+      // 切词:CJK 逐字(无空格,靠单字换行),西文按词,空白单独成 token。
+      // 区间端点用 \u 转义而非字面字符:U+3000(表意空格)写进源码后肉眼与普通
+      // 空格无异,ESLint 的 no-irregular-whitespace 正是冲它来的。
       const parts =
         inline.text.match(
-          /[　-〿㐀-鿿＀-￯]|\s+|[^\s　-〿㐀-鿿＀-￯]+/g,
+          /[\u3000-\u303F\u3400-\u9FFF\uFF00-\uFFEF]|\s+|[^\s\u3000-\u303F\u3400-\u9FFF\uFF00-\uFFEF]+/g,
         ) ?? [];
       for (const part of parts) {
         const width = measurer.measure(part, font);

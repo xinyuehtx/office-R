@@ -16,3 +16,8 @@ js-sys = "0.3"
 serde = { workspace = true }
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"
+
+[dev-dependencies]
+# DTO 的 JS 线格式(字段名/可选字段省略规则)靠 serde_json 做断言 ——
+# 前端契约拼错一个字母,编译器不会报错,只有这层测试能挡住。
+serde_json = "1.0"

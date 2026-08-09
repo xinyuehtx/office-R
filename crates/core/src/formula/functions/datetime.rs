@@ -31,56 +31,7 @@ pub fn register(m: &mut HashMap<&'static str, FuncImpl>) {
     m.insert("DAYS", days);
 }
 
-// ---- 历法内核(Howard Hinnant 的 days_from_civil 算法)----
-
-/// 公历 (y, m, d) → 距 1970-01-01 的天数(可为负)。
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = (if y >= 0 { y } else { y - 399 }) / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
-
-/// 距 1970-01-01 的天数 → 公历 (y, m, d)。
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719468;
-    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
-/// 1899-12-31 距 1970 的天数,作为序列数换算基准。
-fn epoch_offset() -> i64 {
-    days_from_civil(1899, 12, 31)
-}
-
-/// 公历 → Excel 序列数(含 1900 闰年 bug 复刻)。
-fn ymd_to_serial(y: i64, m: i64, d: i64) -> i64 {
-    let naive = days_from_civil(y, m, d) - epoch_offset();
-    // naive>=60 对应 1900-03-01 及以后,补上虚构的 1900-02-29
-    if naive >= 60 {
-        naive + 1
-    } else {
-        naive
-    }
-}
-
-/// Excel 序列数(整数天)→ 公历。
-fn serial_to_ymd(serial: i64) -> (i64, i64, i64) {
-    if serial == 60 {
-        return (1900, 2, 29); // 虚构的闰日
-    }
-    let naive = if serial >= 61 { serial - 1 } else { serial };
-    civil_from_days(naive + epoch_offset())
-}
+use crate::serial::{serial_to_ymd, ymd_to_serial};
 
 /// 求值一个序列数参数(取整数天部分)。
 fn serial_arg(ev: &mut Evaluator, node: &Node) -> Result<i64, ExcelError> {

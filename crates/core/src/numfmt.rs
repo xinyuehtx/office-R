@@ -566,38 +566,7 @@ fn parse_numeric_code(code: &str) -> NumFormat {
 
 // ---------- 日期时间格式 ----------
 
-/// Excel 序列数 → 公历(复刻 1900 闰年 bug),与 formula::functions::datetime 一致。
-fn serial_to_ymd(serial: i64) -> (i64, i64, i64) {
-    if serial == 60 {
-        return (1900, 2, 29);
-    }
-    let naive = if serial >= 61 { serial - 1 } else { serial };
-    civil_from_days(naive + epoch_offset())
-}
-
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = (if y >= 0 { y } else { y - 399 }) / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
-fn civil_from_days(z: i64) -> (i64, i64, i64) {
-    let z = z + 719468;
-    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-fn epoch_offset() -> i64 {
-    days_from_civil(1899, 12, 31)
-}
+use crate::serial::serial_to_ymd;
 
 const MONTH_ABBR: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -620,10 +589,12 @@ const MONTH_FULL: [&str; 12] = [
 /// 按日期时间格式码渲染。支持 `yyyy/yy m/mm/mmm/mmmm d/dd h/hh s/ss` 与分隔符。
 fn format_datetime(value: f64, code: &str) -> String {
     let serial = value.floor() as i64;
+    // 负序列数在 Excel 里是 #####(无法表示的日期);这里退回纪元当天,
+    // 至少给出一个真实存在的日期,而不是早先硬编码的 1900-01-00。
     let (y, mo, d) = if serial >= 0 {
         serial_to_ymd(serial)
     } else {
-        (1900, 1, 0)
+        (1900, 1, 1)
     };
     let frac = value - value.floor();
     let total_secs = (frac * 86400.0).round() as i64;

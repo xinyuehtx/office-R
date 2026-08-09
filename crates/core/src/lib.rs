@@ -26,8 +26,10 @@ pub mod docx;
 pub mod filter;
 pub mod format;
 pub mod formula;
+pub mod limits;
 pub mod numfmt;
 pub mod pptx;
+pub mod serial;
 pub mod sheet;
 pub mod xlsx;
 

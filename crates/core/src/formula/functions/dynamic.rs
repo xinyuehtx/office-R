@@ -170,6 +170,12 @@ fn sequence(ev: &mut Evaluator, args: &[Node]) -> Value {
     if rows <= 0 || cols <= 0 {
         return Value::Error(ExcelError::Value);
     }
+    // 元素数上限:`=SEQUENCE(100000,100000)` 是 100 亿个元素,
+    // `(rows * cols) as usize` 在 wasm32 上还会被截断成 32 位(65536×65536 正好截成 0),
+    // 随后 i64 循环跑到内存耗尽。先判面积再分配。
+    if (rows as i128) * (cols as i128) > crate::limits::MAX_ARRAY_ELEMS as i128 {
+        return Value::Error(ExcelError::Num);
+    }
     let start = args
         .get(2)
         .and_then(|a| ev.eval_number(a).ok())
