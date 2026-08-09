@@ -728,6 +728,35 @@ impl WasmWorkbook {
         Ok(arr.into())
     }
 
+    /// 第 `i` 张工作表的列宽覆盖 `[[col, excelWidth], ...]`(Excel 字符宽度)。
+    #[wasm_bindgen(js_name = colWidths)]
+    pub fn col_widths(&self, i: usize) -> Result<JsValue, JsValue> {
+        let s = self
+            .sheets
+            .get(i)
+            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
+        let arr = js_sys::Array::new();
+        for &(c, w) in &s.col_widths {
+            let pair = js_sys::Array::new();
+            pair.push(&JsValue::from_f64(c as f64));
+            pair.push(&JsValue::from_f64(w));
+            arr.push(&pair);
+        }
+        Ok(arr.into())
+    }
+
+    /// 第 `i` 张工作表的冻结窗格 `[rows, cols]`。
+    pub fn freeze(&self, i: usize) -> Result<JsValue, JsValue> {
+        let s = self
+            .sheets
+            .get(i)
+            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
+        let arr = js_sys::Array::new();
+        arr.push(&JsValue::from_f64(s.freeze_rows as f64));
+        arr.push(&JsValue::from_f64(s.freeze_cols as f64));
+        Ok(arr.into())
+    }
+
     /// 媒体(图片)数量。
     #[wasm_bindgen(js_name = mediaCount)]
     pub fn media_count(&self) -> usize {

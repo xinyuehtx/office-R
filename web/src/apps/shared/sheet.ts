@@ -184,6 +184,10 @@ export interface SheetHandle {
   images?: SheetImage[];
   /** 内嵌图表(xlsx)。 */
   charts?: SheetChart[];
+  /** xlsx 列宽覆盖:`[col, CSS 像素][]`;换表时应用到渲染器。 */
+  colWidthsPx?: [number, number][];
+  /** xlsx 冻结窗格 `[rows, cols]`;换表时自动应用。 */
+  freeze?: [number, number];
   /** 释放底层资源(WASM 线性内存里的表格)。 */
   dispose(): void;
 }

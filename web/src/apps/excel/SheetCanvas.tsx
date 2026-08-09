@@ -179,6 +179,11 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
     // 内嵌图表(xlsx):直接透传给覆盖层
     renderer.setCharts(sheet.charts ?? []);
 
+    // xlsx 列宽覆盖(冻结由下方专门的 effect 处理)
+    for (const [col, px] of sheet.colWidthsPx ?? []) {
+      renderer.setColumnWidth(col, px);
+    }
+
     // 合并单元格(xlsx):取左上角文本,推给覆盖层跨区绘制
     const mg = sheet.merges ?? [];
     if (mg.length > 0) {
@@ -202,9 +207,10 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
     renderer.requestFrame();
   }, [frozen]);
 
-  // 换数据时重置冻结
+  // 换数据时冻结:xlsx 有冻结窗格则应用,否则清零
   useEffect(() => {
-    setFrozen({ rows: 0, cols: 0 });
+    const f = sheet.freeze;
+    setFrozen(f && (f[0] > 0 || f[1] > 0) ? { rows: f[0], cols: f[1] } : { rows: 0, cols: 0 });
   }, [sheet]);
 
   // 过滤变化:在 WASM 侧重算命中行,再让渲染器按新行集刷新(保留滚动/缩放)

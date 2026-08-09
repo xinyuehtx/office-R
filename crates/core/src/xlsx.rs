@@ -18,7 +18,9 @@
 //! 求值后并入 `CellFmt::fill`,复用填充渲染。
 //! **图表**(`xl/charts/chartN.xml`:柱/线/饼 的系列 `numCache` + 类别 `strCache` + 标题)进
 //! `XlsxSheet::charts`,网格覆盖层绘制简单柱/线/饼图。
-//! **非目标**:迷你图(sparkline,x14 extLst)、数据条/图标集条件格式、公式型 cfRule、图表坐标轴/图例。
+//! **列宽**(`col@width`)与**冻结窗格**(`sheetView/pane`)进 `XlsxSheet`,网格应用原始列宽 + 自动冻结。
+//! **非目标**:迷你图(sparkline,x14 extLst)、数据条/图标集条件格式、公式型 cfRule、图表坐标轴/图例、
+//! 变高行(网格假定等高行)。
 
 use std::io::{Cursor, Read};
 
@@ -47,6 +49,11 @@ pub struct XlsxSheet {
     pub images: Vec<XlsxImage>,
     /// 内嵌图表(柱/线/饼),锚定到单元格区域,含系列数值与类别。
     pub charts: Vec<XlsxChart>,
+    /// 列宽覆盖:`(col, Excel 字符宽度)`(来自 `col@width`)。
+    pub col_widths: Vec<(u32, f64)>,
+    /// 冻结窗格:顶部行数 / 左侧列数(来自 `sheetView/pane`)。
+    pub freeze_rows: u32,
+    pub freeze_cols: u32,
 }
 
 /// 内嵌图表(只读渲染)。
@@ -162,11 +169,13 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
         let values = wb.worksheet_range(&name).map_err(|e| e.to_string())?;
         let formulas_range = wb.worksheet_formula(&name).ok();
 
-        // 每格样式索引 + 合并区(自解析 sheetN.xml)
-        let (cell_styles, merges) = match (zip.as_mut(), path_map.get(&name)) {
+        // 每格样式索引 + 合并区 + 列宽 + 冻结(自解析 sheetN.xml)
+        let geom = match (zip.as_mut(), path_map.get(&name)) {
             (Some(z), Some(path)) => read_cell_styles(z, path),
-            _ => (std::collections::HashMap::new(), Vec::new()),
+            _ => SheetGeom::default(),
         };
+        let cell_styles = geom.styles;
+        let merges = geom.merges;
 
         // 内嵌图片 + 图表(自解析 worksheet rels → drawing → media / chart)
         let (images, charts) = match (zip.as_mut(), path_map.get(&name)) {
@@ -211,6 +220,9 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
             fmt_map.into_iter().map(|((r, c), f)| (r, c, f)).collect();
         formats.sort_by_key(|&(r, c, _)| (r, c));
 
+        let mut col_widths: Vec<(u32, f64)> = geom.col_widths.into_iter().collect();
+        col_widths.sort_by_key(|&(c, _)| c);
+
         sheets.push(XlsxSheet {
             name,
             sheet,
@@ -219,6 +231,9 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
             formats,
             images,
             charts,
+            col_widths,
+            freeze_rows: geom.freeze_rows,
+            freeze_cols: geom.freeze_cols,
         });
     }
 
@@ -992,18 +1007,25 @@ fn normalize_xl_path(target: &str) -> String {
 
 /// 解析某 `sheetN.xml`:得到 每格 `(row,col)` → cellXfs 索引,以及合并区。
 #[allow(clippy::type_complexity)]
-fn read_cell_styles(
-    zip: &mut ZipArchive<Cursor<Vec<u8>>>,
-    path: &str,
-) -> (
-    std::collections::HashMap<(u32, u32), usize>,
-    Vec<(u32, u32, u32, u32)>,
-) {
-    let mut styles = std::collections::HashMap::new();
-    let mut merges = Vec::new();
+/// 从 `sheetN.xml` 抽取的几何/样式信息。
+#[derive(Default)]
+struct SheetGeom {
+    /// `(row, col)` → cellXfs 样式索引。
+    styles: std::collections::HashMap<(u32, u32), usize>,
+    /// 合并区。
+    merges: Vec<(u32, u32, u32, u32)>,
+    /// 列宽覆盖:列(0 基)→ Excel 字符宽度(`col@width`)。
+    col_widths: std::collections::HashMap<u32, f64>,
+    /// 冻结的顶部行数 / 左侧列数(来自 `sheetView/pane`)。
+    freeze_rows: u32,
+    freeze_cols: u32,
+}
+
+fn read_cell_styles(zip: &mut ZipArchive<Cursor<Vec<u8>>>, path: &str) -> SheetGeom {
+    let mut g = SheetGeom::default();
     let xml = match zip_text(zip, path) {
         Some(x) => x,
-        None => return (styles, merges),
+        None => return g,
     };
     let mut reader = XmlReader::from_str(&xml);
     let mut buf = Vec::new();
@@ -1011,19 +1033,44 @@ fn read_cell_styles(
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 let n = local(&e);
-                if n == "c" {
-                    if let (Some(rc), Some(s)) = (
-                        attr(&e, "r").and_then(|r| parse_a1(&r)),
-                        attr(&e, "s").and_then(|s| s.parse::<usize>().ok()),
-                    ) {
-                        styles.insert(rc, s);
-                    }
-                } else if n == "mergeCell" {
-                    if let Some(rf) = attr(&e, "ref") {
-                        if let Some(m) = parse_a1_range(&rf) {
-                            merges.push(m);
+                match n.as_str() {
+                    "c" => {
+                        if let (Some(rc), Some(s)) = (
+                            attr(&e, "r").and_then(|r| parse_a1(&r)),
+                            attr(&e, "s").and_then(|s| s.parse::<usize>().ok()),
+                        ) {
+                            g.styles.insert(rc, s);
                         }
                     }
+                    "mergeCell" => {
+                        if let Some(m) = attr(&e, "ref").and_then(|r| parse_a1_range(&r)) {
+                            g.merges.push(m);
+                        }
+                    }
+                    "col" => {
+                        // <col min= max= width= customWidth=/>(1 基列)
+                        if let (Some(min), Some(max), Some(w)) = (
+                            attr(&e, "min").and_then(|s| s.parse::<u32>().ok()),
+                            attr(&e, "max").and_then(|s| s.parse::<u32>().ok()),
+                            attr(&e, "width").and_then(|s| s.parse::<f64>().ok()),
+                        ) {
+                            for c in min..=max.min(min + 16_384) {
+                                if c >= 1 {
+                                    g.col_widths.insert(c - 1, w);
+                                }
+                            }
+                        }
+                    }
+                    // 冻结窗格:xSplit=冻结列数、ySplit=冻结行数(state="frozen")
+                    "pane" if attr(&e, "state").as_deref() == Some("frozen") => {
+                        g.freeze_cols = attr(&e, "xSplit")
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .unwrap_or(0.0) as u32;
+                        g.freeze_rows = attr(&e, "ySplit")
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .unwrap_or(0.0) as u32;
+                    }
+                    _ => {}
                 }
             }
             Ok(Event::Eof) | Err(_) => break,
@@ -1031,7 +1078,7 @@ fn read_cell_styles(
         }
         buf.clear();
     }
-    (styles, merges)
+    g
 }
 
 /// 条件格式规则。
@@ -1468,7 +1515,7 @@ mod tests {
             // A1=0.25 s=1(百分比);B1=1234.5 s=4(#,##0.00 + 蓝边框);A2 s=3(粗+红字+黄底+居中);合并 A2:B2
             put(
                 "xl/worksheets/sheet1.xml",
-                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" s="1"><v>0.25</v></c><c r="B1" s="4"><v>1234.5</v></c></row><row r="2"><c r="A2" s="3" t="inlineStr"><is><t>合并</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A2:B2"/></mergeCells></worksheet>"#,
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView><pane xSplit="1" ySplit="1" topLeftCell="B2" state="frozen"/></sheetView></sheetViews><cols><col min="2" max="2" width="20.5" customWidth="1"/></cols><sheetData><row r="1"><c r="A1" s="1"><v>0.25</v></c><c r="B1" s="4"><v>1234.5</v></c></row><row r="2"><c r="A2" s="3" t="inlineStr"><is><t>合并</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A2:B2"/></mergeCells></worksheet>"#,
             );
             w.finish().unwrap();
         }
@@ -1511,6 +1558,9 @@ mod tests {
             "left thin"
         );
         assert!(b.bottom.is_some() && b.right.is_some());
+        // 列宽:B 列(col 1)= 20.5;冻结 1 行 1 列
+        assert_eq!(s.col_widths, vec![(1, 20.5)]);
+        assert_eq!((s.freeze_rows, s.freeze_cols), (1, 1));
     }
 
     /// 构造带内嵌图片(twoCellAnchor)的最小 xlsx。

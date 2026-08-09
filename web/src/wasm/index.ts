@@ -290,6 +290,10 @@ export async function loadXlsx(bytes: Uint8Array): Promise<XlsxWorkbookHandle> {
       });
       // 内嵌图表
       handle.charts = wb.charts(index) as import("../apps/shared/sheet").SheetChart[];
+      // 列宽(Excel 字符宽度 → CSS px:约 7px/字符 + 5px 边距)+ 冻结窗格
+      const cw = wb.colWidths(index) as [number, number][];
+      handle.colWidthsPx = cw.map(([c, w]) => [c, Math.round(w * 7 + 5)]);
+      handle.freeze = wb.freeze(index) as [number, number];
       return handle;
     },
     dispose() {
