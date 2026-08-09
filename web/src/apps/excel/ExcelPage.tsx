@@ -91,7 +91,9 @@ export function ExcelPage() {
         <p className="office-page__subtitle">
           上传 CSV 或 <code>.xlsx</code> 文件,在 canvas 上查看表格视图。解析、列切分与
           <strong>公式求值</strong>都由 Rust/WASM 内核完成。xlsx 支持
-          <strong>多工作表切换</strong>,单元格显示计算值、公式栏回显原始公式。
+          <strong>多工作表</strong>、<strong>单元格样式</strong>(字体/颜色/填充/对齐)、
+          <strong>数字格式</strong>、<strong>合并单元格</strong>与<strong>内嵌图片</strong>;
+          <strong>过滤 / 排序 / 冻结 / 区域选择复制 / 列宽拖拽 / 查找</strong>一应俱全。
         </p>
       </header>
 
@@ -141,10 +143,15 @@ export function ExcelPage() {
           </p>
           <ul className="office-page__hint">
             <li>CSV:支持 UTF-8 / UTF-16 / GBK 等编码,分隔符自动识别。</li>
-            <li>xlsx:多工作表,单元格显示计算值(公式引擎不重算,直接用缓存结果)。</li>
             <li>
-              以 <code>=</code> 开头的单元格按 Excel 公式求值,支持 SUM/IF/VLOOKUP/DATE 等
-              140+ 函数。点「加载公式示例」试试。
+              xlsx:多工作表,单元格显示计算值 + 数字格式,渲染字体/颜色/填充/对齐、合并单元格、内嵌图片。
+            </li>
+            <li>
+              以 <code>=</code> 开头的单元格按 Excel 公式求值,支持 SUM/IF/VLOOKUP/XLOOKUP/DATE 等
+              150+ 函数(含跨表引用、具名区域)。点「加载公式示例」试试。
+            </li>
+            <li>
+              过滤 / 排序 / 冻结行列 / 区域选择 + 复制(Ctrl⌘C)/ 列宽拖拽 / 查找(Ctrl⌘F)。
             </li>
             <li>滚轮或拖拽平移,Ctrl(⌘)加滚轮以指针为中心缩放,方向键移动选区。</li>
           </ul>

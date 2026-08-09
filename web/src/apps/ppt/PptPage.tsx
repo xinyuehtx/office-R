@@ -180,8 +180,8 @@ export function PptPage() {
         <h2>演示 · PowerPoint</h2>
         <p className="office-page__subtitle">
           上传 .pptx 文件,在 canvas 上渲染幻灯:文本框、图片、自选图形与对齐;
-          形状旋转/翻转、图表/SmartArt 占位、动画/切换徽标。
-          解析在 Rust/WASM 侧完成。支持缩略图导航与全屏演示模式。
+          形状旋转/翻转、渐变填充、内嵌表格、图表/SmartArt 占位、动画/切换徽标。
+          解析在 Rust/WASM 侧完成。支持缩放、缩略图导航与全屏演示模式。
         </p>
       </header>
 

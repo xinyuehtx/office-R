@@ -271,8 +271,8 @@ export function WordPage() {
         <h2>文档 · Word</h2>
         <p className="office-page__subtitle">
           上传 .docx 文件,在 canvas 上按流式布局渲染:标题、正文、加粗/斜体/颜色、
-          对齐、列表、图片、表格与图文混排;分栏、页眉页脚、修订(插入/删除)标记。
-          解析在 Rust/WASM 侧完成,长文档纵向虚拟化。
+          对齐、列表、图片、表格与图文混排;分栏、页眉页脚、修订、超链接、脚注、批注、
+          缩进/段距/行距。支持缩放与全文查找(Ctrl⌘F)。解析在 Rust/WASM 侧完成,长文档纵向虚拟化。
         </p>
       </header>
 
