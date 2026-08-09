@@ -14,6 +14,13 @@ test.describe("Word 只读渲染", () => {
     await expect
       .poll(() => canvasNonEmptyPixels(page, 'canvas[data-testid="word-canvas"]'))
       .toBeGreaterThan(1000);
+
+    // 缩放控件:放大后百分比更新且仍有内容
+    await page.getByTestId("word-zoom-in").click();
+    await expect(page.getByTestId("word-zoom-reset")).toContainText("125%");
+    await expect
+      .poll(() => canvasNonEmptyPixels(page, 'canvas[data-testid="word-canvas"]'))
+      .toBeGreaterThan(1000);
   });
 
   test("滚动到底部仍渲染(纵向虚拟化)", async ({ page }) => {

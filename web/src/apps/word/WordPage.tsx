@@ -36,6 +36,10 @@ export function WordPage() {
   const rafRef = useRef<number | null>(null);
   /** 内容总高度:撑起滚动条(spacer 高度);canvas 只画可见切片。 */
   const [contentHeight, setContentHeight] = useState(0);
+  /** 用户缩放倍率(50%–200%)。 */
+  const [zoom, setZoom] = useState(1);
+  const zoomRef = useRef(1);
+  zoomRef.current = zoom;
 
   /** 画一帧:只绘制与视口相交的项。 */
   const draw = useCallback(() => {
@@ -57,21 +61,25 @@ export function WordPage() {
       canvas.style.height = `${cssH}px`;
     }
     const scrollY = scroller.scrollTop;
+    const zoom = zoomRef.current;
 
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, cssW, cssH);
+    // 缩放:内容在布局坐标里,乘以 zoom 后再绘制;滚动量换算回布局空间
+    ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, 0, 0);
+    ctx.clearRect(0, 0, cssW / zoom, cssH / zoom);
     ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, cssW, cssH);
+    ctx.fillRect(0, 0, cssW / zoom, cssH / zoom);
 
-    const top = scrollY - OVERSCAN;
-    const bottom = scrollY + cssH + OVERSCAN;
+    // 布局空间里的滚动量与可见窗口
+    const scrollYL = scrollY / zoom;
+    const top = scrollYL - OVERSCAN;
+    const bottom = scrollYL + cssH / zoom + OVERSCAN;
     ctx.textBaseline = "middle";
     ctx.textAlign = "left";
 
     for (const item of layout.items) {
       if (item.kind === "textline") {
         if (item.y + item.height < top || item.y - item.height > bottom) continue;
-        const drawY = item.y - scrollY;
+        const drawY = item.y - scrollYL;
         for (const seg of item.segments) {
           ctx.font = seg.font;
           ctx.fillStyle = seg.color;
@@ -94,15 +102,15 @@ export function WordPage() {
         if (item.y + item.height < top || item.y > bottom) continue;
         ctx.strokeStyle = "#d0d7de";
         ctx.lineWidth = 1;
-        ctx.strokeRect(item.x + 0.5, item.y - scrollY + 0.5, item.width, item.height);
+        ctx.strokeRect(item.x + 0.5, item.y - scrollYL + 0.5, item.width, item.height);
       } else {
         if (item.y + item.height < top || item.y > bottom) continue;
         const img = imagesRef.current.get(item.id);
         if (img && img.complete && img.naturalWidth > 0) {
-          ctx.drawImage(img, item.x, item.y - scrollY, item.width, item.height);
+          ctx.drawImage(img, item.x, item.y - scrollYL, item.width, item.height);
         } else {
           ctx.strokeStyle = "#d0d7de";
-          ctx.strokeRect(item.x + 0.5, item.y - scrollY + 0.5, item.width, item.height);
+          ctx.strokeRect(item.x + 0.5, item.y - scrollYL + 0.5, item.width, item.height);
         }
       }
     }
@@ -137,6 +145,7 @@ export function WordPage() {
         }
 
         layoutRef.current = layoutDoc(doc.model, PAGE_WIDTH, sharedMeasurer);
+        setZoom(1);
         setContentHeight(layoutRef.current.height);
         setStats({
           blocks: doc.model.blocks.length,
@@ -153,6 +162,12 @@ export function WordPage() {
     },
     [requestDraw],
   );
+
+  // 缩放变化:spacer 高度按 zoom 缩放,重绘
+  useEffect(() => {
+    if (layoutRef.current) setContentHeight(layoutRef.current.height * zoom);
+    requestDraw();
+  }, [zoom, requestDraw]);
 
   useEffect(() => {
     const scroller = scrollRef.current;
@@ -195,6 +210,29 @@ export function WordPage() {
         {stats && (
           <span className="office-page__muted" data-testid="word-stats">
             {stats.blocks} 个顶层块 · {stats.images} 张图片 · 高 {stats.heightPx}px
+          </span>
+        )}
+        {status === "ready" && (
+          <span className="ppt-zoom" data-testid="word-zoom">
+            <button
+              type="button"
+              data-testid="word-zoom-out"
+              onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.25).toFixed(2)))}
+              title="缩小"
+            >
+              −
+            </button>
+            <button type="button" data-testid="word-zoom-reset" onClick={() => setZoom(1)} title="100%">
+              {Math.round(zoom * 100)}%
+            </button>
+            <button
+              type="button"
+              data-testid="word-zoom-in"
+              onClick={() => setZoom((z) => Math.min(2, +(z + 0.25).toFixed(2)))}
+              title="放大"
+            >
+              +
+            </button>
           </span>
         )}
       </div>
