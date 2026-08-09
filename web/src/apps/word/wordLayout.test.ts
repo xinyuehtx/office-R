@@ -246,6 +246,18 @@ describe("wordLayout · 页眉页脚 + 分栏 + 修订", () => {
     expect(layout.items.some((i) => i.kind === "rect" && i.height === 0)).toBe(true);
   });
 
+  it("批注:渲染在正文末尾", () => {
+    const layout = layoutDoc(
+      { blocks: [para([run("正文")])], comments: [para([run("张三:改一下")])] },
+      820,
+      measurer,
+    );
+    const texts = layout.items
+      .filter((i) => i.kind === "textline")
+      .map((i) => (i.kind === "textline" ? i.segments.map((s) => s.text).join("") : ""));
+    expect(texts.some((t) => t.includes("张三"))).toBe(true);
+  });
+
   it("缩进 + 段前间距:首行右移且下移", () => {
     const plain = layoutDoc({ blocks: [para([run("普通")])] }, 820, measurer);
     const indented = layoutDoc(

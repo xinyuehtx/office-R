@@ -10,8 +10,8 @@
 //! 覆盖范围(本期只读):文字、加粗/斜体/下划线、字号/颜色、标题(Heading1-6)、
 //! 段落对齐、项目符号/编号列表、内联图片、表格、图文混排、分栏、页眉页脚、
 //! 修订(插入/删除)、超链接(蓝色下划线)、脚注(文末汇总 + 引用标记 `[n]`)、
-//! 左缩进 / 段前段后间距 / 行距倍数。
-//! **非目标**:文本框绘图、公式对象(OMML)、批注、域/目录(TOC)。
+//! 左缩进 / 段前段后间距 / 行距倍数、批注(文末「作者:内容」汇总)。
+//! **非目标**:文本框绘图、公式对象(OMML)、域/目录(TOC 的结果文本已随普通 run 渲染)。
 
 use serde::Serialize;
 
@@ -167,6 +167,9 @@ pub struct WordDoc {
     /// 脚注(来自 footnotes part);每条一个块,渲染在正文末尾。
     #[serde(default)]
     pub footnotes: Vec<Block>,
+    /// 批注(来自 comments part);每条「作者:内容」一个块,渲染在正文末尾。
+    #[serde(default)]
+    pub comments: Vec<Block>,
 }
 
 /// 一张图片的字节(单独于模型,便于按需转移到 JS)。
@@ -241,6 +244,8 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedDoc, String> {
 
     // 脚注:docx.footnotes 里每条 footnote 的文本转块,前缀「n.」编号
     let footnotes = collect_footnotes(&docx);
+    // 批注:comments part,每条「作者:内容」
+    let comments = collect_comments(&docx);
 
     Ok(ParsedDoc {
         doc: WordDoc {
@@ -249,9 +254,50 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedDoc, String> {
             header,
             footer,
             footnotes,
+            comments,
         },
         images,
     })
+}
+
+/// 收集批注为块序列:每条 `作者:内容`(内容经 serde 递归取 run 文本)。
+fn collect_comments(docx: &Docx) -> Vec<Block> {
+    let mut out = Vec::new();
+    for c in docx.comments.inner() {
+        let mut text = String::new();
+        if let Ok(v) = serde_json::to_value(&c.children) {
+            gather_text(&v, &mut text);
+        }
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let label = if c.author.is_empty() {
+            text.to_string()
+        } else {
+            format!("{}:{}", c.author, text)
+        };
+        out.push(Block::Paragraph(Paragraph {
+            heading: None,
+            align: Align::Left,
+            list: None,
+            inlines: vec![Inline::Text(Run {
+                text: label,
+                bold: false,
+                italic: true,
+                underline: false,
+                size_pt: Some(9.0),
+                color: Some("8250df".to_string()),
+                revision: Revision::None,
+                link: None,
+            })],
+            indent_px: 0.0,
+            space_before_px: 0.0,
+            space_after_px: 0.0,
+            line_pct: None,
+        }));
+    }
+    out
 }
 
 /// 收集脚注为块序列。`Footnotes.footnotes` 字段是 `pub(crate)` 不可直接访问,
@@ -744,9 +790,10 @@ fn convert_table(t: &docx_rs::Table, ctx: &mut Ctx) -> Table {
 mod tests {
     use super::{parse, Align, Block, Inline, Paragraph, Revision};
     use docx_rs::{
-        AbstractNumbering, AlignmentType, Delete, Docx, Footer, Header, IndentLevel, Insert, Level,
-        LevelJc, LevelText, LineSpacing, NumberFormat, Numbering, NumberingId, Paragraph as DxPara,
-        Run as DxRun, Start, Table as DxTable, TableCell as DxCell, TableRow as DxRow,
+        AbstractNumbering, AlignmentType, Comment, Delete, Docx, Footer, Header, IndentLevel,
+        Insert, Level, LevelJc, LevelText, LineSpacing, NumberFormat, Numbering, NumberingId,
+        Paragraph as DxPara, Run as DxRun, Start, Table as DxTable, TableCell as DxCell,
+        TableRow as DxRow,
     };
 
     /// 用 docx-rs 的写路径构造一份 docx 字节作为测试夹具。
@@ -926,6 +973,41 @@ mod tests {
             ),
             Some("#sec1".to_string())
         );
+    }
+
+    #[test]
+    fn parses_comments_to_blocks() {
+        let mut buf = Vec::new();
+        Docx::new()
+            .add_paragraph(
+                DxPara::new()
+                    .add_comment_start(
+                        Comment::new(1).author("张三").add_paragraph(
+                            DxPara::new().add_run(DxRun::new().add_text("改一下这里")),
+                        ),
+                    )
+                    .add_run(DxRun::new().add_text("正文"))
+                    .add_comment_end(1),
+            )
+            .build()
+            .pack(&mut std::io::Cursor::new(&mut buf))
+            .expect("打包");
+        let parsed = parse(&buf).expect("解析");
+        let joined: String = parsed
+            .doc
+            .comments
+            .iter()
+            .filter_map(|b| match b {
+                Block::Paragraph(p) => p.inlines.iter().find_map(|i| match i {
+                    Inline::Text(r) => Some(r.text.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(joined.contains("改一下这里"), "批注内容:{joined}");
+        assert!(joined.contains("张三"), "批注作者:{joined}");
     }
 
     #[test]

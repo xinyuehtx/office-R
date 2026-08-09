@@ -394,6 +394,15 @@ export function layoutDoc(model: WordModel, pageWidth: number, measurer: TextMea
     y = layoutBlocks(footnotes, x0, contentWidth, y, measurer, items);
   }
 
+  // 批注:一条分隔线 + 各条批注(渲染在正文末尾)
+  const comments = model.comments ?? [];
+  if (comments.length > 0) {
+    y += HF_GAP;
+    items.push({ kind: "rect", x: x0, y, width: contentWidth / 3, height: 0 });
+    y += HF_GAP;
+    y = layoutBlocks(comments, x0, contentWidth, y, measurer, items);
+  }
+
   return { width: pageWidth, height: y + PAGE_PADDING, items };
 }
 
@@ -422,5 +431,6 @@ export function imageIdsIn(model: WordModel): string[] {
   walk(model.header ?? []);
   walk(model.footer ?? []);
   walk(model.footnotes ?? []);
+  walk(model.comments ?? []);
   return [...ids];
 }

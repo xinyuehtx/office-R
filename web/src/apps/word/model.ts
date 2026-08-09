@@ -83,6 +83,8 @@ export interface WordModel {
   footer?: Block[];
   /** 脚注块(渲染在正文末尾)。 */
   footnotes?: Block[];
+  /** 批注块(渲染在正文末尾)。 */
+  comments?: Block[];
 }
 
 /** 图片资源:id → object URL(由字节 + mime 构造)。 */
