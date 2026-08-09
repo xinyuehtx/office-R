@@ -608,8 +608,8 @@ impl WasmWorkbook {
             if let Some(b) = &f.border {
                 // border: { top?:{w,color}, right?, bottom?, left? }
                 let bo = js_sys::Object::new();
-                let mut set_side = |name: &str,
-                                    side: &Option<office_core::xlsx::BorderSide>|
+                let set_side = |name: &str,
+                                side: &Option<office_core::xlsx::BorderSide>|
                  -> Result<(), JsValue> {
                     if let Some(sd) = side {
                         let so = js_sys::Object::new();
