@@ -3,7 +3,13 @@ import { FileUpload } from "../shared/FileUpload";
 import { sharedMeasurer } from "../shared/textMeasure";
 import { loadDocx } from "../../wasm";
 import type { WordDocument } from "./model";
-import { layoutDoc, imageIdsIn, type Layout } from "./wordLayout";
+import {
+  layoutDoc,
+  imageIdsIn,
+  findLineMatches,
+  type Layout,
+  type WordMatch,
+} from "./wordLayout";
 
 type Status = "idle" | "loading" | "ready" | "error";
 
@@ -40,6 +46,13 @@ export function WordPage() {
   const [zoom, setZoom] = useState(1);
   const zoomRef = useRef(1);
   zoomRef.current = zoom;
+  /** 全文查找:是否打开、查询、命中列表、当前命中下标。 */
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findMatches, setFindMatches] = useState<WordMatch[]>([]);
+  const [findIdx, setFindIdx] = useState(0);
+  /** 当前命中的行高亮(布局坐标顶端 y 与高度);null 不画。 */
+  const activeMatchRef = useRef<WordMatch | null>(null);
 
   /** 画一帧:只绘制与视口相交的项。 */
   const draw = useCallback(() => {
@@ -75,6 +88,13 @@ export function WordPage() {
     const bottom = scrollYL + cssH / zoom + OVERSCAN;
     ctx.textBaseline = "middle";
     ctx.textAlign = "left";
+
+    // 当前查找命中:行级黄色高亮(在文字之下)
+    const match = activeMatchRef.current;
+    if (match) {
+      ctx.fillStyle = "#fff3a3";
+      ctx.fillRect(0, match.y - scrollYL, cssW / zoom, match.height);
+    }
 
     for (const item of layout.items) {
       if (item.kind === "textline") {
@@ -121,6 +141,41 @@ export function WordPage() {
     rafRef.current = globalThis.requestAnimationFrame(draw);
   }, [draw]);
 
+  /** 滚动到第 i 个命中并高亮该行。 */
+  const gotoMatch = useCallback(
+    (matches: WordMatch[], i: number) => {
+      if (matches.length === 0) {
+        activeMatchRef.current = null;
+        requestDraw();
+        return;
+      }
+      const idx = ((i % matches.length) + matches.length) % matches.length;
+      setFindIdx(idx);
+      const m = matches[idx];
+      activeMatchRef.current = m;
+      const scroller = scrollRef.current;
+      if (scroller) {
+        // 命中行居中显示(布局坐标 × zoom → 像素)
+        const target = m.y * zoomRef.current - scroller.clientHeight / 2 + m.height * zoomRef.current;
+        scroller.scrollTop = Math.max(0, target);
+      }
+      requestDraw();
+    },
+    [requestDraw],
+  );
+
+  /** 运行查找并跳到首个命中。 */
+  const runFind = useCallback(
+    (query: string) => {
+      setFindQuery(query);
+      const layout = layoutRef.current;
+      const matches = layout ? findLineMatches(layout, query) : [];
+      setFindMatches(matches);
+      gotoMatch(matches, 0);
+    },
+    [gotoMatch],
+  );
+
   const openFile = useCallback(
     async (file: File) => {
       setStatus("loading");
@@ -146,6 +201,10 @@ export function WordPage() {
 
         layoutRef.current = layoutDoc(doc.model, PAGE_WIDTH, sharedMeasurer);
         setZoom(1);
+        setFindOpen(false);
+        setFindQuery("");
+        setFindMatches([]);
+        activeMatchRef.current = null;
         setContentHeight(layoutRef.current.height);
         setStats({
           blocks: doc.model.blocks.length,
@@ -168,6 +227,19 @@ export function WordPage() {
     if (layoutRef.current) setContentHeight(layoutRef.current.height * zoom);
     requestDraw();
   }, [zoom, requestDraw]);
+
+  // Ctrl/⌘+F 打开查找(就绪时)
+  useEffect(() => {
+    if (status !== "ready") return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
+        e.preventDefault();
+        setFindOpen(true);
+      }
+    };
+    globalThis.addEventListener("keydown", onKey);
+    return () => globalThis.removeEventListener("keydown", onKey);
+  }, [status]);
 
   useEffect(() => {
     const scroller = scrollRef.current;
@@ -246,6 +318,62 @@ export function WordPage() {
       {status === "idle" && (
         <div className="office-page__result">
           <p className="office-page__empty">尚未选择文件。上传一个 .docx 查看渲染效果。</p>
+        </div>
+      )}
+
+      {status === "ready" && findOpen && (
+        <div className="sheet__find-bar" data-testid="word-find-bar">
+          <input
+            type="text"
+            className="sheet__find-input"
+            data-testid="word-find-input"
+            placeholder="查找…"
+            autoFocus
+            value={findQuery}
+            onChange={(e) => runFind(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                gotoMatch(findMatches, findIdx + (e.shiftKey ? -1 : 1));
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setFindOpen(false);
+                activeMatchRef.current = null;
+                requestDraw();
+              }
+            }}
+          />
+          <span className="sheet__find-count" data-testid="word-find-count">
+            {findMatches.length > 0 ? `${findIdx + 1}/${findMatches.length}` : "无匹配"}
+          </span>
+          <button
+            type="button"
+            data-testid="word-find-prev"
+            disabled={findMatches.length === 0}
+            onClick={() => gotoMatch(findMatches, findIdx - 1)}
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            data-testid="word-find-next"
+            disabled={findMatches.length === 0}
+            onClick={() => gotoMatch(findMatches, findIdx + 1)}
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            className="office-page__link"
+            data-testid="word-find-close"
+            onClick={() => {
+              setFindOpen(false);
+              activeMatchRef.current = null;
+              requestDraw();
+            }}
+          >
+            关闭
+          </button>
         </div>
       )}
 

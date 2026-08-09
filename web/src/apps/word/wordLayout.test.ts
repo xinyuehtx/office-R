@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { layoutDoc, imageIdsIn } from "./wordLayout";
+import { layoutDoc, imageIdsIn, findLineMatches } from "./wordLayout";
 import { TextMeasurer } from "../shared/textMeasure";
 import type { WordModel, Paragraph, Run } from "./model";
 
@@ -244,6 +244,26 @@ describe("wordLayout · 页眉页脚 + 分栏 + 修订", () => {
     expect(lineTexts.some((t) => t.includes("一条脚注"))).toBe(true);
     // 脚注分隔线为 height=0 的 rect
     expect(layout.items.some((i) => i.kind === "rect" && i.height === 0)).toBe(true);
+  });
+
+  it("全文查找:命中含关键字的行(忽略大小写)", () => {
+    const layout = layoutDoc(
+      {
+        blocks: [
+          para([run("Hello World")]),
+          para([run("第二段落")]),
+          para([run("再来一个 world 结尾")]),
+        ],
+      },
+      820,
+      measurer,
+    );
+    const matches = findLineMatches(layout, "world");
+    expect(matches.length).toBe(2);
+    // 命中按文档顺序(y 递增)
+    expect(matches[0].y).toBeLessThan(matches[1].y);
+    expect(findLineMatches(layout, "不存在")).toHaveLength(0);
+    expect(findLineMatches(layout, "")).toHaveLength(0);
   });
 
   it("批注:渲染在正文末尾", () => {

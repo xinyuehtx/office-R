@@ -48,6 +48,31 @@ export interface Layout {
   items: DrawItem[];
 }
 
+/** 一处全文查找命中:所在行的顶端 y 与行高(布局坐标)。 */
+export interface WordMatch {
+  y: number;
+  height: number;
+}
+
+/**
+ * 全文查找:返回文本行里(不区分大小写)包含 `query` 的行位置,按文档顺序。
+ *
+ * CJK 逐字成段,故按整行拼接后再匹配;跨行的匹配不处理(按行粒度,足够定位)。
+ */
+export function findLineMatches(layout: Layout, query: string): WordMatch[] {
+  const q = query.trim().toLowerCase();
+  if (q === "") return [];
+  const out: WordMatch[] = [];
+  for (const item of layout.items) {
+    if (item.kind !== "textline") continue;
+    const text = item.segments.map((s) => s.text).join("").toLowerCase();
+    if (text.includes(q)) {
+      out.push({ y: item.y - item.height / 2, height: item.height });
+    }
+  }
+  return out;
+}
+
 /** 解析出的一个内联「词」token(用于折行)。 */
 type Token =
   | { type: "word"; text: string; run: Run; width: number; font: string }

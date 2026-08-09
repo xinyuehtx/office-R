@@ -23,6 +23,19 @@ test.describe("Word 只读渲染", () => {
       .toBeGreaterThan(1000);
   });
 
+  test("全文查找:Ctrl+F 命中并计数", async ({ page }) => {
+    await gotoTab(page, "文档");
+    await upload(page, "sample.docx");
+    await expect(page.getByTestId("word-canvas")).toBeVisible();
+    await page.keyboard.press("Control+f");
+    await expect(page.getByTestId("word-find-bar")).toBeVisible();
+    // 夹具表格含「城市」
+    await page.getByTestId("word-find-input").fill("城市");
+    await expect(page.getByTestId("word-find-count")).toContainText("/");
+    await page.getByTestId("word-find-close").click();
+    await expect(page.getByTestId("word-find-bar")).toHaveCount(0);
+  });
+
   test("滚动到底部仍渲染(纵向虚拟化)", async ({ page }) => {
     await gotoTab(page, "文档");
     await upload(page, "sample.docx");
