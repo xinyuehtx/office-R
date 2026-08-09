@@ -175,6 +175,19 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
     } else {
       renderer.setImages([]);
     }
+
+    // 合并单元格(xlsx):取左上角文本,推给覆盖层跨区绘制
+    const mg = sheet.merges ?? [];
+    if (mg.length > 0) {
+      renderer.setMerges(
+        mg.map(([r0, c0, r1, c1]) => {
+          const win = sheet.window(r0, r0 + 1, c0, c0 + 1);
+          return { row0: r0, col0: c0, row1: r1, col1: c1, text: win.text };
+        }),
+      );
+    } else {
+      renderer.setMerges([]);
+    }
   }, [sheet]);
 
   // 冻结变化:推给渲染器(重置滚动、切换到四象限绘制)

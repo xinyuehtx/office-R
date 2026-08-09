@@ -77,6 +77,7 @@ import {
   type CellTextSource,
   type StyleAt,
   type OverlayImage,
+  type OverlayMerge,
 } from "./layers";
 import {
   anchorTile,
@@ -241,6 +242,8 @@ export class GridRenderer {
   private selection: CellRef | null = null;
   /** 内嵌图片(xlsx);已按当前 dpr 预算好尺寸。 */
   private images: OverlayImage[] = [];
+  /** 合并单元格区域(xlsx)。 */
+  private merges: OverlayMerge[] = [];
   private selectionRange: { row0: number; row1: number; col0: number; col1: number } | null = null;
 
   /** 当前瓦片;`null` 表示还没画过。 */
@@ -347,6 +350,7 @@ export class GridRenderer {
     this.hover = null;
     this.colWidthOverrides = [];
     this.images = [];
+    this.merges = [];
     this.windowCache = null;
     this.tile = null;
     this.sheetSetAt = this.now();
@@ -533,6 +537,12 @@ export class GridRenderer {
   /** 设置内嵌图片(xlsx);在覆盖层绘制,随滚动定位。 */
   setImages(images: OverlayImage[]): void {
     this.images = images;
+    this.invalidate("overlay");
+  }
+
+  /** 设置合并单元格区域(xlsx);在覆盖层合并绘制。 */
+  setMerges(merges: OverlayMerge[]): void {
+    this.merges = merges;
     this.invalidate("overlay");
   }
 
@@ -830,6 +840,9 @@ export class GridRenderer {
           selection: this.selection,
           selectionRange: this.selectionRange,
           images: this.images,
+          merges: this.merges,
+          fontSize: this.layout.fontSize,
+          fitter: this.fitter,
         });
         this.stats.layerPaints.overlay += 1;
       }
