@@ -298,113 +298,20 @@ fn read_sheet_drawings(
             continue;
         };
         if let Some(cxml) = zip_text(zip, &chart_path) {
-            if let Some((kind, series, categories, title)) = parse_chart(&cxml) {
+            if let Some(c) = crate::chart::parse_chart_xml(&cxml) {
                 charts.push(XlsxChart {
                     from_row: from.0,
                     from_col: from.1,
                     to,
-                    kind,
-                    series,
-                    categories,
-                    title,
+                    kind: c.kind,
+                    series: c.series,
+                    categories: c.categories,
+                    title: c.title,
                 });
             }
         }
     }
     (out, charts)
-}
-
-/// 图表解析结果:(类型, 各系列数值, 类别标签, 标题)。
-type ParsedChart = (String, Vec<Vec<f64>>, Vec<String>, Option<String>);
-
-/// 解析 chartN.xml:图表类型 + 各系列 numCache 数值 + 首个类别 strCache + 标题。
-/// 返回 `None` 表示没有可识别的图表。
-fn parse_chart(xml: &str) -> Option<ParsedChart> {
-    let mut reader = XmlReader::from_str(xml);
-    let mut buf = Vec::new();
-    let mut kind: Option<String> = None;
-    let mut series: Vec<Vec<f64>> = Vec::new();
-    let mut categories: Vec<String> = Vec::new();
-    let mut title: Option<String> = None;
-
-    // 上下文栈:区分 val/cat 里的 <c:v>,以及 title 里的 <a:t>
-    let mut in_val = false;
-    let mut in_cat = false;
-    let mut in_title = false;
-    let mut in_v = false;
-    let mut cur_series: Vec<f64> = Vec::new();
-    let mut v_buf = String::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => match local(&e).as_str() {
-                "barChart" | "bar3DChart" => {
-                    kind.get_or_insert_with(|| "bar".into());
-                }
-                "lineChart" | "areaChart" => {
-                    kind.get_or_insert_with(|| "line".into());
-                }
-                "pieChart" | "doughnutChart" => {
-                    kind.get_or_insert_with(|| "pie".into());
-                }
-                "ser" => cur_series = Vec::new(),
-                "val" => in_val = true,
-                "cat" => in_cat = true,
-                "title" => in_title = true,
-                "v" if in_val || in_cat => {
-                    in_v = true;
-                    v_buf.clear();
-                }
-                "t" if in_title => {
-                    in_v = true;
-                    v_buf.clear();
-                }
-                _ => {}
-            },
-            Ok(Event::Text(t)) => {
-                if in_v {
-                    if let Ok(s) = t.decode() {
-                        v_buf.push_str(&s);
-                    }
-                }
-            }
-            Ok(Event::End(e)) => match local_end(&e).as_str() {
-                "val" => in_val = false,
-                "cat" => in_cat = false,
-                "title" => in_title = false,
-                "ser" => series.push(std::mem::take(&mut cur_series)),
-                "v" if in_v => {
-                    in_v = false;
-                    if in_val {
-                        if let Ok(n) = v_buf.trim().parse::<f64>() {
-                            cur_series.push(n);
-                        }
-                    } else if in_cat && categories.len() < 4096 {
-                        categories.push(v_buf.trim().to_string());
-                    }
-                }
-                "t" if in_v && in_title => {
-                    in_v = false;
-                    if title.is_none() && !v_buf.trim().is_empty() {
-                        title = Some(v_buf.trim().to_string());
-                    }
-                }
-                _ => {}
-            },
-            Ok(Event::Eof) | Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    // 类别可能被多个系列重复填充;只保留第一个系列长度对应的一份
-    let k = kind?;
-    if series.is_empty() {
-        return None;
-    }
-    // 去重类别:cat 在每个 ser 里都出现,取前 N(= 首系列长度)
-    if let Some(first) = series.first() {
-        categories.truncate(first.len());
-    }
-    Some((k, series, categories, title))
 }
 
 /// 从 rels XML 找首个类型以 `suffix` 结尾的关系 target。
@@ -1720,24 +1627,6 @@ mod tests {
         let mid = fill_at(1, 1).unwrap();
         assert_ne!(mid, "FF0000");
         assert_ne!(mid, "00FF00");
-    }
-
-    #[test]
-    fn parses_bar_chart() {
-        let chart_xml = r#"<?xml version="1.0"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
-          <c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>销量</a:t></a:r></a:p></c:rich></c:tx></c:title>
-          <c:plotArea><c:barChart>
-            <c:ser>
-              <c:cat><c:strRef><c:strCache><c:pt idx="0"><c:v>一月</c:v></c:pt><c:pt idx="1"><c:v>二月</c:v></c:pt></c:strCache></c:strRef></c:cat>
-              <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt></c:numCache></c:numRef></c:val>
-            </c:ser>
-          </c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
-        let (kind, series, cats, title) = super::parse_chart(chart_xml).expect("应解析出图表");
-        assert_eq!(kind, "bar");
-        assert_eq!(series.len(), 1);
-        assert_eq!(series[0], vec![10.0, 20.0]);
-        assert_eq!(cats, vec!["一月".to_string(), "二月".to_string()]);
-        assert_eq!(title.as_deref(), Some("销量"));
     }
 
     #[test]

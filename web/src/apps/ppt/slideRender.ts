@@ -8,6 +8,7 @@
 import type { Slide, Shape, Align, SlideTable } from "./model";
 import { FONT_FAMILY } from "../excel/grid/theme";
 import { sharedMeasurer } from "../shared/textMeasure";
+import { drawChartInRect } from "../shared/chartDraw";
 
 const DEFAULT_TEXT = "#1f2328";
 
@@ -240,6 +241,13 @@ export function drawSlide(
     // 内嵌表格:真实网格 + 单元格文本
     if (shape.table && shape.table.rows.length > 0) {
       drawTable(ctx, shape.table, x, y, w, h, scale);
+      if (needXform) ctx.restore();
+      continue;
+    }
+
+    // 内嵌图表:柱/线/饼(复用共享绘制)
+    if (shape.chart && shape.chart.series.length > 0) {
+      drawChartInRect(ctx, shape.chart, x, y, w, h, Math.max(11, 14 * scale), FONT_FAMILY);
       if (needXform) ctx.restore();
       continue;
     }

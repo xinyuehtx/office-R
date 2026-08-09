@@ -18,6 +18,7 @@
 //! 数字/日期格式化、图表仍未实现。新增能力一律在 `Sheet` 之上叠层,
 //! 而不是把这些概念混进表格模型。详见 `docs/architecture.md`。
 
+pub mod chart;
 pub mod csv;
 pub mod docx;
 pub mod excel;

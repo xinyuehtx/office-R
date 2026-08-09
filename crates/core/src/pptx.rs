@@ -13,12 +13,13 @@
 //! 主题配色 `schemeClr`(解析 `ppt/theme/theme1.xml` 的 `clrScheme`,含 tx1/bg1→dk1/lt1 默认映射)、
 //! 旋转/翻转(`a:xfrm@rot/@flipH/@flipV`)、文本默认样式继承(母版 `p:txStyles`)、
 //! 动画/切换标记(`p:timing`/`p:transition` → `has_animation`/`has_transition`)、
-//! 图表/SmartArt 占位(`p:graphicFrame` → `placeholder_kind`,仅占位框 + 类型标签)、
+//! SmartArt 占位(`p:graphicFrame` diagram → `placeholder_kind`)、
 //! 组合形状 `p:grpSp`(按 `chOff`/`chExt`→`off`/`ext` 映射子坐标,支持嵌套)、
 //! 渐变填充 `a:gradFill`(取首/末停靠色,视图上→下线性渐变)、
-//! 内嵌表格 `a:tbl`(列宽/行/单元格文本 → 视图绘制真实网格)。
-//! **非目标**:动画/切换的具体时间线回放、图表/SmartArt 的真实绘制、自定义几何、图片填充、阴影效果、
-//! 表格单元格合并/样式。
+//! 内嵌表格 `a:tbl`(列宽/行/单元格文本 → 视图绘制真实网格)、
+//! 内嵌图表(`c:chart r:id` → 经 slide rels 找 chartN.xml,复用 `crate::chart` 解析柱/线/饼)。
+//! **非目标**:动画/切换的具体时间线回放、SmartArt 真实绘制、自定义几何、图片填充、阴影效果、
+//! 表格单元格合并/样式、图表坐标轴/图例。
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -95,6 +96,12 @@ pub struct Shape {
     /// 内嵌表格(`a:tbl`);非表格为 `None`。有表格时视图绘制真实网格 + 单元格文本。
     #[serde(default)]
     pub table: Option<Table>,
+    /// 内嵌图表(柱/线/饼);非图表为 `None`。有图表时视图绘制真实图形。
+    #[serde(default)]
+    pub chart: Option<crate::chart::ChartData>,
+    /// 图表关系 id(`c:chart r:id`);仅解析中转用,不序列化。
+    #[serde(skip)]
+    pub chart_rid: Option<String>,
 }
 
 /// 幻灯内表格(来自 `p:graphicFrame` 的 `a:tbl`)。
@@ -170,7 +177,19 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedPpt, String> {
             fallback: &fallback,
             text_defaults: &text_defaults,
         };
-        let slide = parse_slide(&xml, &ctx);
+        let mut slide = parse_slide(&xml, &ctx);
+        // 解析图表:形状带 chart_rid → 经 slide rels 找到 chartN.xml → 解析系列数据
+        let rels_map: HashMap<String, String> = rels.iter().cloned().collect();
+        for shape in &mut slide.shapes {
+            if let Some(rid) = shape.chart_rid.take() {
+                if let Some(target) = rels_map.get(&rid) {
+                    let chart_path = normalize_media_path(target);
+                    if let Ok(cxml) = read_zip_text(&mut zip, &chart_path) {
+                        shape.chart = crate::chart::parse_chart_xml(&cxml);
+                    }
+                }
+            }
+        }
         slides.push(slide);
 
         // 收集该幻灯用到的图片字节
@@ -402,6 +421,8 @@ struct ShapeBuilder {
     grad_stops: Vec<String>,
     /// 内嵌表格(累积中);无表格为 `None`。
     table: Option<Table>,
+    /// 图表关系 id(`c:chart r:id`);解析后经 rels 换成 chart 数据。
+    chart_rid: Option<String>,
 }
 
 impl ShapeBuilder {
@@ -424,6 +445,8 @@ impl ShapeBuilder {
                 _ => None,
             },
             table: self.table,
+            chart: None,
+            chart_rid: self.chart_rid,
         }
     }
     fn is_renderable(&self) -> bool {
@@ -433,6 +456,7 @@ impl ShapeBuilder {
             || !self.paragraphs.is_empty()
             || self.placeholder_kind.is_some()
             || self.table.is_some()
+            || self.chart_rid.is_some()
     }
 }
 
@@ -566,6 +590,20 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
                         in_cell = true;
                         cell_text.clear();
                     }
+                    // graphicData(chart 时为 Start,含子 c:chart)→ 内容类型
+                    "graphicData" => {
+                        if let Some(b) = cur.as_mut() {
+                            b.placeholder_kind = graphic_kind(&attr(&e, "uri").unwrap_or_default());
+                        }
+                    }
+                    // 图表引用 <c:chart r:id="..."> → 记录 rId,parse() 中经 rels 换成数据
+                    "chart" => {
+                        if let Some(id) = attr_ns(&e, "id") {
+                            if let Some(b) = cur.as_mut() {
+                                b.chart_rid = Some(id);
+                            }
+                        }
+                    }
                     _ => {}
                 }
                 // 表格内的 gridCol/tr/tc(及其 Empty 形式)不走形状文本路径
@@ -595,6 +633,14 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
                 if name == "graphicData" {
                     if let Some(b) = cur.as_mut() {
                         b.placeholder_kind = graphic_kind(&attr(&e, "uri").unwrap_or_default());
+                    }
+                }
+                // 图表引用 <c:chart r:id="..."/>(空元素)
+                if name == "chart" {
+                    if let Some(id) = attr_ns(&e, "id") {
+                        if let Some(b) = cur.as_mut() {
+                            b.chart_rid = Some(id);
+                        }
                     }
                 }
                 // 表格列宽(gridCol 常为空元素)
@@ -1522,6 +1568,54 @@ mod tests {
             Some("1F3864"),
             "应继承母版 title 颜色"
         );
+    }
+
+    #[test]
+    fn parses_slide_chart_via_rels() {
+        // 构造一个含 graphicFrame chart 引用的 pptx,验证 chart 数据经 rels 解析进 Shape
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::{CompressionMethod, ZipWriter};
+        let mut buf = Vec::new();
+        {
+            let mut w = ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            let mut put = |name: &str, data: &str| {
+                w.start_file(name, opts).unwrap();
+                w.write_all(data.as_bytes()).unwrap();
+            };
+            put(
+                "ppt/presentation.xml",
+                r#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldSz cx="9144000" cy="6858000"/><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>"#,
+            );
+            put(
+                "ppt/_rels/presentation.xml.rels",
+                r#"<Relationships xmlns="x"><Relationship Id="rId1" Type="t" Target="slides/slide1.xml"/></Relationships>"#,
+            );
+            put(
+                "ppt/slides/slide1.xml",
+                r#"<p:sld xmlns:p="p" xmlns:a="a" xmlns:r="r"><p:cSld><p:spTree>
+              <p:graphicFrame><p:xfrm><a:off x="0" y="0"/><a:ext cx="4572000" cy="2743200"/></p:xfrm>
+                <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="c" r:id="rId9"/></a:graphicData></a:graphic>
+              </p:graphicFrame></p:spTree></p:cSld></p:sld>"#,
+            );
+            put(
+                "ppt/slides/_rels/slide1.xml.rels",
+                r#"<Relationships xmlns="x"><Relationship Id="rId9" Type="chart" Target="../charts/chart1.xml"/></Relationships>"#,
+            );
+            put(
+                "ppt/charts/chart1.xml",
+                r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:barChart><c:ser>
+              <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt><c:pt idx="1"><c:v>7</c:v></c:pt></c:numCache></c:numRef></c:val>
+            </c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#,
+            );
+            w.finish().unwrap();
+        }
+        let parsed = parse(&buf).expect("解析");
+        let shape = &parsed.presentation.slides[0].shapes[0];
+        let chart = shape.chart.as_ref().expect("应解析出图表");
+        assert_eq!(chart.kind, "bar");
+        assert_eq!(chart.series, vec![vec![3.0, 7.0]]);
     }
 
     #[test]

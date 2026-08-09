@@ -40,6 +40,16 @@ export interface Shape {
   gradient?: [string, string] | null;
   /** 内嵌表格;非表格为 null。 */
   table?: SlideTable | null;
+  /** 内嵌图表;非图表为 null。 */
+  chart?: SlideChart | null;
+}
+
+/** 幻灯内图表(与 Excel 图表同构)。 */
+export interface SlideChart {
+  kind: string;
+  series: number[][];
+  categories: string[];
+  title?: string | null;
 }
 
 /** 幻灯内表格。 */
