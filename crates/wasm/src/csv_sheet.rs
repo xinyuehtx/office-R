@@ -681,6 +681,53 @@ impl WasmWorkbook {
         Ok(arr.into())
     }
 
+    /// 第 `i` 张工作表的内嵌图表
+    /// `[{fromRow,fromCol,toRow?,toCol?,kind,series:[[..]],categories:[..],title?}, ...]`。
+    pub fn charts(&self, i: usize) -> Result<JsValue, JsValue> {
+        let s = self
+            .sheets
+            .get(i)
+            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
+        let arr = js_sys::Array::new();
+        for ch in &s.charts {
+            let o = js_sys::Object::new();
+            js_sys::Reflect::set(
+                &o,
+                &"fromRow".into(),
+                &JsValue::from_f64(ch.from_row as f64),
+            )?;
+            js_sys::Reflect::set(
+                &o,
+                &"fromCol".into(),
+                &JsValue::from_f64(ch.from_col as f64),
+            )?;
+            if let Some((tr, tc)) = ch.to {
+                js_sys::Reflect::set(&o, &"toRow".into(), &JsValue::from_f64(tr as f64))?;
+                js_sys::Reflect::set(&o, &"toCol".into(), &JsValue::from_f64(tc as f64))?;
+            }
+            js_sys::Reflect::set(&o, &"kind".into(), &JsValue::from_str(&ch.kind))?;
+            if let Some(t) = &ch.title {
+                js_sys::Reflect::set(&o, &"title".into(), &JsValue::from_str(t))?;
+            }
+            let series = js_sys::Array::new();
+            for ser in &ch.series {
+                let a = js_sys::Array::new();
+                for &v in ser {
+                    a.push(&JsValue::from_f64(v));
+                }
+                series.push(&a);
+            }
+            js_sys::Reflect::set(&o, &"series".into(), &series)?;
+            let cats = js_sys::Array::new();
+            for c in &ch.categories {
+                cats.push(&JsValue::from_str(c));
+            }
+            js_sys::Reflect::set(&o, &"categories".into(), &cats)?;
+            arr.push(&o);
+        }
+        Ok(arr.into())
+    }
+
     /// 媒体(图片)数量。
     #[wasm_bindgen(js_name = mediaCount)]
     pub fn media_count(&self) -> usize {

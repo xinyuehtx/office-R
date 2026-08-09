@@ -103,6 +103,19 @@ export interface CellStyle {
   };
 }
 
+/** 内嵌图表(锚定单元格区域 + 系列数据)。 */
+export interface SheetChart {
+  fromRow: number;
+  fromCol: number;
+  toRow?: number;
+  toCol?: number;
+  /** "bar" / "line" / "pie"。 */
+  kind: string;
+  title?: string;
+  series: number[][];
+  categories: string[];
+}
+
 /** 内嵌图片(锚定单元格 + object URL)。 */
 export interface SheetImage {
   /** 左上锚单元格(0 基)。 */
@@ -169,6 +182,8 @@ export interface SheetHandle {
   merges?: [number, number, number, number][];
   /** 内嵌图片(xlsx)。 */
   images?: SheetImage[];
+  /** 内嵌图表(xlsx)。 */
+  charts?: SheetChart[];
   /** 释放底层资源(WASM 线性内存里的表格)。 */
   dispose(): void;
 }

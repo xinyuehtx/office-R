@@ -288,6 +288,8 @@ export async function loadXlsx(bytes: Uint8Array): Promise<XlsxWorkbookHandle> {
         if (a.extH !== undefined) img.extH = a.extH;
         return [img];
       });
+      // 内嵌图表
+      handle.charts = wb.charts(index) as import("../apps/shared/sheet").SheetChart[];
       return handle;
     },
     dispose() {

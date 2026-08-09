@@ -16,7 +16,9 @@
 //! 单元格**边框线**(`borders`/`cellXfs@borderId`,四边线型→线宽 + 颜色)进 `CellFmt::border`,网格按格描边。
 //! **条件格式**(`conditionalFormatting`:`cellIs` 比较 → dxf 填充、`colorScale` 2/3 色阶插值)
 //! 求值后并入 `CellFmt::fill`,复用填充渲染。
-//! **非目标**:图表/迷你图、数据条/图标集条件格式、公式型 cfRule。
+//! **图表**(`xl/charts/chartN.xml`:柱/线/饼 的系列 `numCache` + 类别 `strCache` + 标题)进
+//! `XlsxSheet::charts`,网格覆盖层绘制简单柱/线/饼图。
+//! **非目标**:迷你图(sparkline,x14 extLst)、数据条/图标集条件格式、公式型 cfRule、图表坐标轴/图例。
 
 use std::io::{Cursor, Read};
 
@@ -43,6 +45,26 @@ pub struct XlsxSheet {
     pub formats: Vec<(u32, u32, CellFmt)>,
     /// 内嵌图片(锚定到单元格);字节在 [`XlsxWorkbook::media`] 里按 `media_key` 取。
     pub images: Vec<XlsxImage>,
+    /// 内嵌图表(柱/线/饼),锚定到单元格区域,含系列数值与类别。
+    pub charts: Vec<XlsxChart>,
+}
+
+/// 内嵌图表(只读渲染)。
+#[derive(Debug, Clone)]
+pub struct XlsxChart {
+    /// 左上锚单元格(0 基)。
+    pub from_row: u32,
+    pub from_col: u32,
+    /// 右下锚单元格(twoCellAnchor);无则 `None`。
+    pub to: Option<(u32, u32)>,
+    /// 图表类型:`"bar"` / `"line"` / `"pie"`。
+    pub kind: String,
+    /// 各系列的数值(来自 numCache)。
+    pub series: Vec<Vec<f64>>,
+    /// 类别标签(来自首个 cat 的 strCache);可能为空。
+    pub categories: Vec<String>,
+    /// 图表标题(如有)。
+    pub title: Option<String>,
 }
 
 /// 锚定到单元格的内嵌图片。位置以单元格下标 + 尺寸表达(网格按自身列宽近似定位)。
@@ -146,10 +168,10 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
             _ => (std::collections::HashMap::new(), Vec::new()),
         };
 
-        // 内嵌图片(自解析 worksheet rels → drawing → media)
-        let images = match (zip.as_mut(), path_map.get(&name)) {
-            (Some(z), Some(path)) => read_sheet_images(z, path, &mut media),
-            _ => Vec::new(),
+        // 内嵌图片 + 图表(自解析 worksheet rels → drawing → media / chart)
+        let (images, charts) = match (zip.as_mut(), path_map.get(&name)) {
+            (Some(z), Some(path)) => read_sheet_drawings(z, path, &mut media),
+            _ => (Vec::new(), Vec::new()),
         };
 
         let (sheet, formulas) = build_sheet(
@@ -196,6 +218,7 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
             merges,
             formats,
             images,
+            charts,
         });
     }
 
@@ -204,11 +227,11 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
 
 /// 解析某工作表的内嵌图片:worksheet rels → drawingN.xml → 锚点 + embed;
 /// drawing rels → embed → media 路径;去重收集 media 字节到 `media`。
-fn read_sheet_images(
+fn read_sheet_drawings(
     zip: &mut ZipArchive<Cursor<Vec<u8>>>,
     sheet_path: &str,
     media: &mut Vec<XlsxMedia>,
-) -> Vec<XlsxImage> {
+) -> (Vec<XlsxImage>, Vec<XlsxChart>) {
     // worksheet rels:.../worksheets/_rels/sheetN.xml.rels
     let (dir, file) = sheet_path
         .rsplit_once('/')
@@ -219,26 +242,26 @@ fn read_sheet_images(
         None => None,
     };
     let Some(drawing_path) = drawing_target.map(|t| resolve_rel_path(dir, &t)) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
-    // drawing rels:embed id → media 路径
+    // drawing rels:rId → 目标(图片 media 或 chartN.xml)
     let (ddir, dfile) = drawing_path
         .rsplit_once('/')
         .unwrap_or(("xl/drawings", &drawing_path));
     let drels = format!("{ddir}/_rels/{dfile}.rels");
-    let embed_map = zip_text(zip, &drels)
+    let rel_map = zip_text(zip, &drels)
         .map(|xml| all_rel_targets(&xml, ddir))
         .unwrap_or_default();
 
     let xml = match zip_text(zip, &drawing_path) {
         Some(x) => x,
-        None => return Vec::new(),
+        None => return (Vec::new(), Vec::new()),
     };
-    let raw = parse_drawing(&xml);
+    let (raw_imgs, raw_charts) = parse_drawing(&xml);
 
     let mut out = Vec::new();
-    for (embed, from, to, ext) in raw {
-        let Some(key) = embed_map.get(&embed).cloned() else {
+    for (embed, from, to, ext) in raw_imgs {
+        let Some(key) = rel_map.get(&embed).cloned() else {
             continue;
         };
         // 收集 media 字节(去重)
@@ -267,7 +290,121 @@ fn read_sheet_images(
             ext_px: ext,
         });
     }
-    out
+
+    // 图表:rId → chartN.xml,解析系列
+    let mut charts = Vec::new();
+    for (rid, from, to) in raw_charts {
+        let Some(chart_path) = rel_map.get(&rid).cloned() else {
+            continue;
+        };
+        if let Some(cxml) = zip_text(zip, &chart_path) {
+            if let Some((kind, series, categories, title)) = parse_chart(&cxml) {
+                charts.push(XlsxChart {
+                    from_row: from.0,
+                    from_col: from.1,
+                    to,
+                    kind,
+                    series,
+                    categories,
+                    title,
+                });
+            }
+        }
+    }
+    (out, charts)
+}
+
+/// 图表解析结果:(类型, 各系列数值, 类别标签, 标题)。
+type ParsedChart = (String, Vec<Vec<f64>>, Vec<String>, Option<String>);
+
+/// 解析 chartN.xml:图表类型 + 各系列 numCache 数值 + 首个类别 strCache + 标题。
+/// 返回 `None` 表示没有可识别的图表。
+fn parse_chart(xml: &str) -> Option<ParsedChart> {
+    let mut reader = XmlReader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut kind: Option<String> = None;
+    let mut series: Vec<Vec<f64>> = Vec::new();
+    let mut categories: Vec<String> = Vec::new();
+    let mut title: Option<String> = None;
+
+    // 上下文栈:区分 val/cat 里的 <c:v>,以及 title 里的 <a:t>
+    let mut in_val = false;
+    let mut in_cat = false;
+    let mut in_title = false;
+    let mut in_v = false;
+    let mut cur_series: Vec<f64> = Vec::new();
+    let mut v_buf = String::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => match local(&e).as_str() {
+                "barChart" | "bar3DChart" => {
+                    kind.get_or_insert_with(|| "bar".into());
+                }
+                "lineChart" | "areaChart" => {
+                    kind.get_or_insert_with(|| "line".into());
+                }
+                "pieChart" | "doughnutChart" => {
+                    kind.get_or_insert_with(|| "pie".into());
+                }
+                "ser" => cur_series = Vec::new(),
+                "val" => in_val = true,
+                "cat" => in_cat = true,
+                "title" => in_title = true,
+                "v" if in_val || in_cat => {
+                    in_v = true;
+                    v_buf.clear();
+                }
+                "t" if in_title => {
+                    in_v = true;
+                    v_buf.clear();
+                }
+                _ => {}
+            },
+            Ok(Event::Text(t)) => {
+                if in_v {
+                    if let Ok(s) = t.decode() {
+                        v_buf.push_str(&s);
+                    }
+                }
+            }
+            Ok(Event::End(e)) => match local_end(&e).as_str() {
+                "val" => in_val = false,
+                "cat" => in_cat = false,
+                "title" => in_title = false,
+                "ser" => series.push(std::mem::take(&mut cur_series)),
+                "v" if in_v => {
+                    in_v = false;
+                    if in_val {
+                        if let Ok(n) = v_buf.trim().parse::<f64>() {
+                            cur_series.push(n);
+                        }
+                    } else if in_cat && categories.len() < 4096 {
+                        categories.push(v_buf.trim().to_string());
+                    }
+                }
+                "t" if in_v && in_title => {
+                    in_v = false;
+                    if title.is_none() && !v_buf.trim().is_empty() {
+                        title = Some(v_buf.trim().to_string());
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    // 类别可能被多个系列重复填充;只保留第一个系列长度对应的一份
+    let k = kind?;
+    if series.is_empty() {
+        return None;
+    }
+    // 去重类别:cat 在每个 ser 里都出现,取前 N(= 首系列长度)
+    if let Some(first) = series.first() {
+        categories.truncate(first.len());
+    }
+    Some((k, series, categories, title))
 }
 
 /// 从 rels XML 找首个类型以 `suffix` 结尾的关系 target。
@@ -329,15 +466,20 @@ fn resolve_rel_path(base_dir: &str, target: &str) -> String {
 
 /// 解析 drawingN.xml:返回 `(embed, (from_row,from_col), to?, ext_px?)` 列表。
 #[allow(clippy::type_complexity)]
-fn parse_drawing(xml: &str) -> Vec<(String, (u32, u32), Option<(u32, u32)>, Option<(f64, f64)>)> {
+type DrawImage = (String, (u32, u32), Option<(u32, u32)>, Option<(f64, f64)>);
+type DrawChart = (String, (u32, u32), Option<(u32, u32)>);
+
+fn parse_drawing(xml: &str) -> (Vec<DrawImage>, Vec<DrawChart>) {
     let mut reader = XmlReader::from_str(xml);
     let mut buf = Vec::new();
     let mut out = Vec::new();
+    let mut charts: Vec<DrawChart> = Vec::new();
     // 当前锚状态
     let mut from: Option<(u32, u32)> = None;
     let mut to: Option<(u32, u32)> = None;
     let mut ext: Option<(f64, f64)> = None;
     let mut embed: Option<String> = None;
+    let mut chart_rid: Option<String> = None;
     // from/to 内部当前读到的 col/row(文本在子元素里)
     let mut in_from = false;
     let mut in_to = false;
@@ -352,6 +494,13 @@ fn parse_drawing(xml: &str) -> Vec<(String, (u32, u32), Option<(u32, u32)>, Opti
                     to = None;
                     ext = None;
                     embed = None;
+                    chart_rid = None;
+                }
+                // 图表引用 <c:chart r:id="..."/>(也可能作 Start)
+                "chart" => {
+                    if let Some(id) = attr(&e, "id") {
+                        chart_rid = Some(id);
+                    }
                 }
                 "from" => {
                     in_from = true;
@@ -378,6 +527,10 @@ fn parse_drawing(xml: &str) -> Vec<(String, (u32, u32), Option<(u32, u32)>, Opti
                 } else if n == "blip" {
                     if let Some(id) = attr(&e, "embed") {
                         embed = Some(id);
+                    }
+                } else if n == "chart" {
+                    if let Some(id) = attr(&e, "id") {
+                        chart_rid = Some(id);
                     }
                 }
             }
@@ -410,6 +563,8 @@ fn parse_drawing(xml: &str) -> Vec<(String, (u32, u32), Option<(u32, u32)>, Opti
                 "twoCellAnchor" | "oneCellAnchor" => {
                     if let (Some(f), Some(em)) = (from, embed.take()) {
                         out.push((em, f, to, ext));
+                    } else if let (Some(f), Some(rid)) = (from, chart_rid.take()) {
+                        charts.push((rid, f, to));
                     }
                     from = None;
                     to = None;
@@ -422,7 +577,7 @@ fn parse_drawing(xml: &str) -> Vec<(String, (u32, u32), Option<(u32, u32)>, Opti
         }
         buf.clear();
     }
-    out
+    (out, charts)
 }
 
 /// 由扩展名推断图片 MIME。
@@ -1565,6 +1720,24 @@ mod tests {
         let mid = fill_at(1, 1).unwrap();
         assert_ne!(mid, "FF0000");
         assert_ne!(mid, "00FF00");
+    }
+
+    #[test]
+    fn parses_bar_chart() {
+        let chart_xml = r#"<?xml version="1.0"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>销量</a:t></a:r></a:p></c:rich></c:tx></c:title>
+          <c:plotArea><c:barChart>
+            <c:ser>
+              <c:cat><c:strRef><c:strCache><c:pt idx="0"><c:v>一月</c:v></c:pt><c:pt idx="1"><c:v>二月</c:v></c:pt></c:strCache></c:strRef></c:cat>
+              <c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt></c:numCache></c:numRef></c:val>
+            </c:ser>
+          </c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let (kind, series, cats, title) = super::parse_chart(chart_xml).expect("应解析出图表");
+        assert_eq!(kind, "bar");
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0], vec![10.0, 20.0]);
+        assert_eq!(cats, vec!["一月".to_string(), "二月".to_string()]);
+        assert_eq!(title.as_deref(), Some("销量"));
     }
 
     #[test]

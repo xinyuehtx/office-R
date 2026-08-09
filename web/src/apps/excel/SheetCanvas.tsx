@@ -176,6 +176,9 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
       renderer.setImages([]);
     }
 
+    // 内嵌图表(xlsx):直接透传给覆盖层
+    renderer.setCharts(sheet.charts ?? []);
+
     // 合并单元格(xlsx):取左上角文本,推给覆盖层跨区绘制
     const mg = sheet.merges ?? [];
     if (mg.length > 0) {
