@@ -14,7 +14,9 @@
 //!
 //! 合并区在网格覆盖层**跨格合并绘制**(白底盖内部线 + 跨区左上角文本 + 外框)。
 //! 单元格**边框线**(`borders`/`cellXfs@borderId`,四边线型→线宽 + 颜色)进 `CellFmt::border`,网格按格描边。
-//! **非目标**:条件格式、图表/迷你图。
+//! **条件格式**(`conditionalFormatting`:`cellIs` 比较 → dxf 填充、`colorScale` 2/3 色阶插值)
+//! 求值后并入 `CellFmt::fill`,复用填充渲染。
+//! **非目标**:图表/迷你图、数据条/图标集条件格式、公式型 cfRule。
 
 use std::io::{Cursor, Read};
 
@@ -158,14 +160,33 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
         );
 
         // 每格视觉样式(仅非默认)
-        let mut formats = Vec::new();
+        let mut fmt_map: std::collections::HashMap<(u32, u32), CellFmt> =
+            std::collections::HashMap::new();
         for (&(r, c), &s) in &cell_styles {
             if let Some(fmt) = styles.fmts.get(s) {
                 if !fmt.is_default() {
-                    formats.push((r, c, fmt.clone()));
+                    fmt_map.insert((r, c), fmt.clone());
                 }
             }
         }
+
+        // 条件格式:求值后把结果填充色并入(覆盖静态填充)
+        let cf = match path_map.get(&name) {
+            Some(path) => zip
+                .as_mut()
+                .map(|z| read_conditional_formatting(z, path))
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        if !cf.is_empty() {
+            let cf_fills = evaluate_cf(&cf, &sheet, &styles.dxf_fills);
+            for ((r, c), fill) in cf_fills {
+                fmt_map.entry((r, c)).or_default().fill = Some(fill);
+            }
+        }
+
+        let mut formats: Vec<(u32, u32, CellFmt)> =
+            fmt_map.into_iter().map(|((r, c), f)| (r, c, f)).collect();
         formats.sort_by_key(|&(r, c, _)| (r, c));
 
         sheets.push(XlsxSheet {
@@ -546,6 +567,8 @@ fn attr(e: &BytesStart, key: &str) -> Option<String> {
 struct StyleTable {
     codes: Vec<Option<String>>,
     fmts: Vec<CellFmt>,
+    /// 差异格式(`<dxfs>`)的填充色,供条件格式 `cellIs@dxfId` 引用。
+    dxf_fills: Vec<Option<String>>,
 }
 
 /// 解析 `xl/styles.xml`:numFmts + fonts + fills + cellXfs → 每个样式索引的
@@ -565,6 +588,9 @@ fn read_style_table(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> StyleTable {
     let mut buf = Vec::new();
     // 区段与「当前正在构建」的状态
     let (mut in_fonts, mut in_fills, mut in_cellxfs, mut in_borders) = (false, false, false, false);
+    // 差异格式 dxfs:每个 dxf 的填充色(bgColor);当前 dxf 累积
+    let mut in_dxfs = false;
+    let mut cur_dxf_fill: Option<String> = None;
     let mut cur_font: Option<(bool, bool, Option<String>)> = None;
     let mut cur_fill_solid = false;
     let mut cur_fill_color: Option<String> = None;
@@ -662,6 +688,16 @@ fn read_style_table(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> StyleTable {
                         let (side_name, style) = cur_side.take().unwrap();
                         apply_side(cur_border.as_mut().unwrap(), &side_name, &style, rgb);
                     }
+                    "dxfs" => in_dxfs = true,
+                    "dxf" if in_dxfs => {
+                        cur_dxf_fill = None;
+                        if empty {
+                            table.dxf_fills.push(None);
+                        }
+                    }
+                    "bgColor" if in_dxfs => {
+                        cur_dxf_fill = attr(&e, "rgb").map(|s| normalize_argb(&s));
+                    }
                     "xf" if in_cellxfs => {
                         let numfmt = attr(&e, "numFmtId")
                             .and_then(|s| s.parse::<u32>().ok())
@@ -696,6 +732,12 @@ fn read_style_table(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> StyleTable {
                 "fills" => in_fills = false,
                 "borders" => in_borders = false,
                 "cellXfs" => in_cellxfs = false,
+                "dxfs" => in_dxfs = false,
+                "dxf" => {
+                    if in_dxfs {
+                        table.dxf_fills.push(cur_dxf_fill.take());
+                    }
+                }
                 "font" => {
                     if let Some(f) = cur_font.take() {
                         fonts.push(f);
@@ -928,6 +970,235 @@ fn read_cell_styles(
         buf.clear();
     }
     (styles, merges)
+}
+
+/// 条件格式规则。
+enum CfKind {
+    /// `cellIs`:按运算符与操作数比较,命中则用 dxf 填充色。
+    CellIs {
+        op: String,
+        operands: Vec<f64>,
+        dxf_id: usize,
+    },
+    /// 色阶:2 或 3 色,按区域内数值线性插值填充。
+    ColorScale { colors: Vec<String> },
+}
+
+/// 一块条件格式区域:作用单元格 + 规则。
+struct CfRegion {
+    cells: Vec<(u32, u32)>,
+    kind: CfKind,
+}
+
+/// 解析某 `sheetN.xml` 的 `conditionalFormatting` 区域(cellIs / colorScale)。
+fn read_conditional_formatting(zip: &mut ZipArchive<Cursor<Vec<u8>>>, path: &str) -> Vec<CfRegion> {
+    let xml = match zip_text(zip, path) {
+        Some(x) => x,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    let mut reader = XmlReader::from_str(&xml);
+    let mut buf = Vec::new();
+    // 当前 conditionalFormatting 的作用格 + 当前 cfRule 累积
+    let mut cur_cells: Vec<(u32, u32)> = Vec::new();
+    let mut cur_type: Option<String> = None;
+    let mut cur_op: Option<String> = None;
+    let mut cur_dxf: usize = 0;
+    let mut cur_formulas: Vec<f64> = Vec::new();
+    let mut cur_colors: Vec<String> = Vec::new();
+    let mut in_formula = false;
+    let mut formula_buf = String::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local(&e).as_str() {
+                "conditionalFormatting" => {
+                    cur_cells = attr(&e, "sqref")
+                        .map(|s| expand_sqref(&s))
+                        .unwrap_or_default();
+                }
+                "cfRule" => {
+                    cur_type = attr(&e, "type");
+                    cur_op = attr(&e, "operator");
+                    cur_dxf = attr(&e, "dxfId").and_then(|s| s.parse().ok()).unwrap_or(0);
+                    cur_formulas.clear();
+                    cur_colors.clear();
+                }
+                "formula" => {
+                    in_formula = true;
+                    formula_buf.clear();
+                }
+                "color" if cur_type.as_deref() == Some("colorScale") => {
+                    if let Some(rgb) = attr(&e, "rgb").map(|s| normalize_argb(&s)) {
+                        cur_colors.push(rgb);
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::Text(t)) => {
+                if in_formula {
+                    if let Ok(s) = t.decode() {
+                        formula_buf.push_str(&s);
+                    }
+                }
+            }
+            Ok(Event::End(e)) => match local_end(&e).as_str() {
+                "formula" => {
+                    in_formula = false;
+                    if let Ok(v) = formula_buf.trim().parse::<f64>() {
+                        cur_formulas.push(v);
+                    }
+                }
+                "cfRule" => {
+                    let cells = cur_cells.clone();
+                    match cur_type.as_deref() {
+                        Some("cellIs") => out.push(CfRegion {
+                            cells,
+                            kind: CfKind::CellIs {
+                                op: cur_op.clone().unwrap_or_default(),
+                                operands: cur_formulas.clone(),
+                                dxf_id: cur_dxf,
+                            },
+                        }),
+                        Some("colorScale") if cur_colors.len() >= 2 => out.push(CfRegion {
+                            cells,
+                            kind: CfKind::ColorScale {
+                                colors: cur_colors.clone(),
+                            },
+                        }),
+                        _ => {}
+                    }
+                    cur_type = None;
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// 展开 `sqref`(空格分隔的多个 A1 范围或单元格)为单元格坐标列表。
+fn expand_sqref(sqref: &str) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    for part in sqref.split_whitespace() {
+        if let Some((r0, c0, r1, c1)) = parse_a1_range(part) {
+            for r in r0..=r1 {
+                for c in c0..=c1 {
+                    out.push((r, c));
+                }
+            }
+        } else if let Some(rc) = parse_a1(part) {
+            out.push(rc);
+        }
+    }
+    out
+}
+
+/// 对条件格式区域求值,产出 `(row, col) → 填充色 RRGGBB` 覆盖(后者优先)。
+fn evaluate_cf(
+    regions: &[CfRegion],
+    sheet: &Sheet,
+    dxf_fills: &[Option<String>],
+) -> std::collections::HashMap<(u32, u32), String> {
+    let mut out = std::collections::HashMap::new();
+    let num_at = |r: u32, c: u32| -> Option<f64> {
+        sheet
+            .cell(r as usize, c as usize)
+            .trim()
+            .parse::<f64>()
+            .ok()
+    };
+    for region in regions {
+        match &region.kind {
+            CfKind::CellIs {
+                op,
+                operands,
+                dxf_id,
+            } => {
+                let Some(Some(fill)) = dxf_fills.get(*dxf_id) else {
+                    continue;
+                };
+                for &(r, c) in &region.cells {
+                    let Some(v) = num_at(r, c) else { continue };
+                    if cell_is_match(op, v, operands) {
+                        out.insert((r, c), fill.clone());
+                    }
+                }
+            }
+            CfKind::ColorScale { colors } => {
+                let vals: Vec<((u32, u32), f64)> = region
+                    .cells
+                    .iter()
+                    .filter_map(|&(r, c)| num_at(r, c).map(|v| ((r, c), v)))
+                    .collect();
+                if vals.is_empty() {
+                    continue;
+                }
+                let min = vals.iter().map(|&(_, v)| v).fold(f64::INFINITY, f64::min);
+                let max = vals
+                    .iter()
+                    .map(|&(_, v)| v)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                for (rc, v) in vals {
+                    let t = if max > min {
+                        (v - min) / (max - min)
+                    } else {
+                        0.5
+                    };
+                    out.insert(rc, color_scale(colors, t));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// cellIs 运算符判定。
+fn cell_is_match(op: &str, v: f64, operands: &[f64]) -> bool {
+    let a = operands.first().copied().unwrap_or(0.0);
+    let b = operands.get(1).copied().unwrap_or(0.0);
+    match op {
+        "greaterThan" => v > a,
+        "greaterThanOrEqual" => v >= a,
+        "lessThan" => v < a,
+        "lessThanOrEqual" => v <= a,
+        "equal" => v == a,
+        "notEqual" => v != a,
+        "between" => v >= a.min(b) && v <= a.max(b),
+        "notBetween" => v < a.min(b) || v > a.max(b),
+        _ => false,
+    }
+}
+
+/// 色阶插值:t∈[0,1] 在 colors(2 或 3 色)间线性取色 → RRGGBB。
+fn color_scale(colors: &[String], t: f64) -> String {
+    let t = t.clamp(0.0, 1.0);
+    let parse = |s: &str| -> (f64, f64, f64) {
+        let n = u32::from_str_radix(s, 16).unwrap_or(0);
+        (
+            ((n >> 16) & 0xff) as f64,
+            ((n >> 8) & 0xff) as f64,
+            (n & 0xff) as f64,
+        )
+    };
+    let lerp = |a: (f64, f64, f64), b: (f64, f64, f64), u: f64| -> String {
+        let r = (a.0 + (b.0 - a.0) * u).round() as u32;
+        let g = (a.1 + (b.1 - a.1) * u).round() as u32;
+        let bl = (a.2 + (b.2 - a.2) * u).round() as u32;
+        format!("{r:02X}{g:02X}{bl:02X}")
+    };
+    if colors.len() >= 3 {
+        let (lo, mid, hi) = (parse(&colors[0]), parse(&colors[1]), parse(&colors[2]));
+        if t <= 0.5 {
+            lerp(lo, mid, t / 0.5)
+        } else {
+            lerp(mid, hi, (t - 0.5) / 0.5)
+        }
+    } else {
+        lerp(parse(&colors[0]), parse(&colors[1]), t)
+    }
 }
 
 /// A1 记法 → (row, col)(0 基)。
@@ -1233,6 +1504,67 @@ mod tests {
             .expect("media");
         assert_eq!(m.mime, "image/png");
         assert!(!m.data.is_empty());
+    }
+
+    #[test]
+    fn conditional_formatting_cellis_and_colorscale() {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::{CompressionMethod, ZipWriter};
+        let mut buf = Vec::new();
+        {
+            let mut w = ZipWriter::new(Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            let mut put = |name: &str, data: &str| {
+                w.start_file(name, opts).unwrap();
+                w.write_all(data.as_bytes()).unwrap();
+            };
+            put(
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            );
+            put(
+                "_rels/.rels",
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            );
+            put(
+                "xl/workbook.xml",
+                r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+            );
+            put(
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#,
+            );
+            // dxf[0] 填充红 FF0000
+            put(
+                "xl/styles.xml",
+                r#"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="1"><xf numFmtId="0"/></cellXfs><dxfs count="1"><dxf><fill><patternFill><bgColor rgb="FFFF0000"/></patternFill></fill></dxf></dxfs></styleSheet>"#,
+            );
+            // A1..A3 = 1,5,9;cellIs >4 → A2/A3 红;B1..B3 = 0,50,100 colorScale 红→绿
+            put(
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><v>0</v></c></row><row r="2"><c r="A2"><v>5</v></c><c r="B2"><v>50</v></c></row><row r="3"><c r="A3"><v>9</v></c><c r="B3"><v>100</v></c></row></sheetData><conditionalFormatting sqref="A1:A3"><cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>4</formula></cfRule></conditionalFormatting><conditionalFormatting sqref="B1:B3"><cfRule type="colorScale" priority="2"><colorScale><cfvo type="min"/><cfvo type="max"/><color rgb="FFFF0000"/><color rgb="FF00FF00"/></colorScale></cfRule></conditionalFormatting></worksheet>"#,
+            );
+            w.finish().unwrap();
+        }
+        let wb = parse(&buf).expect("解析");
+        let s = &wb.sheets[0];
+        let fill_at = |r: u32, c: u32| {
+            s.formats
+                .iter()
+                .find(|&&(rr, cc, _)| (rr, cc) == (r, c))
+                .and_then(|(_, _, f)| f.fill.clone())
+        };
+        // cellIs > 4:A1(1)无,A2(5)/A3(9)红
+        assert_eq!(fill_at(0, 0), None);
+        assert_eq!(fill_at(1, 0).as_deref(), Some("FF0000"));
+        assert_eq!(fill_at(2, 0).as_deref(), Some("FF0000"));
+        // colorScale:B1=min 红、B3=max 绿、B2 中间(非纯红/绿)
+        assert_eq!(fill_at(0, 1).as_deref(), Some("FF0000"));
+        assert_eq!(fill_at(2, 1).as_deref(), Some("00FF00"));
+        let mid = fill_at(1, 1).unwrap();
+        assert_ne!(mid, "FF0000");
+        assert_ne!(mid, "00FF00");
     }
 
     #[test]
