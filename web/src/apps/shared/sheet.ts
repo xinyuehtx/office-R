@@ -78,6 +78,12 @@ export interface UniqueValues {
   truncated: boolean;
 }
 
+/** 一条边框线:宽度(px)+ 颜色 RRGGBB。 */
+export interface BorderSide {
+  w: number;
+  color: string;
+}
+
 /** 单元格视觉样式(xlsx;只读渲染)。 */
 export interface CellStyle {
   bold?: boolean;
@@ -88,6 +94,13 @@ export interface CellStyle {
   fill?: string;
   /** 水平对齐。 */
   align?: "left" | "center" | "right";
+  /** 四边边框。 */
+  border?: {
+    top?: BorderSide;
+    right?: BorderSide;
+    bottom?: BorderSide;
+    left?: BorderSide;
+  };
 }
 
 /** 内嵌图片(锚定单元格 + object URL)。 */

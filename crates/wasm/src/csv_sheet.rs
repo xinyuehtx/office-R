@@ -605,6 +605,26 @@ impl WasmWorkbook {
             if let Some(a) = &f.align {
                 js_sys::Reflect::set(&o, &"align".into(), &JsValue::from_str(a))?;
             }
+            if let Some(b) = &f.border {
+                // border: { top?:{w,color}, right?, bottom?, left? }
+                let bo = js_sys::Object::new();
+                let mut set_side = |name: &str,
+                                    side: &Option<office_core::xlsx::BorderSide>|
+                 -> Result<(), JsValue> {
+                    if let Some(sd) = side {
+                        let so = js_sys::Object::new();
+                        js_sys::Reflect::set(&so, &"w".into(), &JsValue::from_f64(sd.width))?;
+                        js_sys::Reflect::set(&so, &"color".into(), &JsValue::from_str(&sd.color))?;
+                        js_sys::Reflect::set(&bo, &name.into(), &so)?;
+                    }
+                    Ok(())
+                };
+                set_side("top", &b.top)?;
+                set_side("right", &b.right)?;
+                set_side("bottom", &b.bottom)?;
+                set_side("left", &b.left)?;
+                js_sys::Reflect::set(&o, &"border".into(), &bo)?;
+            }
             arr.push(&o);
         }
         Ok(arr.into())

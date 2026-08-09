@@ -259,6 +259,7 @@ export async function loadXlsx(bytes: Uint8Array): Promise<XlsxWorkbookHandle> {
           color: s.color,
           fill: s.fill,
           align: s.align,
+          border: s.border,
         });
       }
       handle.cellStyle = (r, c) => styleMap.get(`${r},${c}`) ?? null;

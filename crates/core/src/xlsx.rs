@@ -13,7 +13,8 @@
 //! 网格覆盖层按锚点单元格近似定位绘制。
 //!
 //! 合并区在网格覆盖层**跨格合并绘制**(白底盖内部线 + 跨区左上角文本 + 外框)。
-//! **非目标**:单元格边框线样式、条件格式、图表/迷你图。
+//! 单元格**边框线**(`borders`/`cellXfs@borderId`,四边线型→线宽 + 颜色)进 `CellFmt::border`,网格按格描边。
+//! **非目标**:条件格式、图表/迷你图。
 
 use std::io::{Cursor, Read};
 
@@ -75,6 +76,30 @@ pub struct CellFmt {
     pub fill: Option<String>,
     /// 水平对齐:`"left"`/`"center"`/`"right"`。
     pub align: Option<String>,
+    /// 四边边框(上/右/下/左);无边框为 `None`。
+    pub border: Option<Borders>,
+}
+
+/// 单元格四边边框(只读渲染)。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Borders {
+    pub top: Option<BorderSide>,
+    pub right: Option<BorderSide>,
+    pub bottom: Option<BorderSide>,
+    pub left: Option<BorderSide>,
+}
+
+impl Borders {
+    fn is_empty(&self) -> bool {
+        self.top.is_none() && self.right.is_none() && self.bottom.is_none() && self.left.is_none()
+    }
+}
+
+/// 一条边框线:粗细(px)+ 颜色 `RRGGBB`。
+#[derive(Debug, Clone, PartialEq)]
+pub struct BorderSide {
+    pub width: f64,
+    pub color: String,
 }
 
 impl CellFmt {
@@ -84,6 +109,7 @@ impl CellFmt {
             && self.color.is_none()
             && self.fill.is_none()
             && self.align.is_none()
+            && self.border.is_none()
     }
 }
 
@@ -532,16 +558,20 @@ fn read_style_table(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> StyleTable {
     let mut custom: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     let mut fonts: Vec<(bool, bool, Option<String>)> = Vec::new(); // (bold, italic, color)
     let mut fills: Vec<Option<String>> = Vec::new();
+    let mut borders: Vec<Borders> = Vec::new();
     let mut table = StyleTable::default();
 
     let mut reader = XmlReader::from_str(&xml);
     let mut buf = Vec::new();
     // 区段与「当前正在构建」的状态
-    let (mut in_fonts, mut in_fills, mut in_cellxfs) = (false, false, false);
+    let (mut in_fonts, mut in_fills, mut in_cellxfs, mut in_borders) = (false, false, false, false);
     let mut cur_font: Option<(bool, bool, Option<String>)> = None;
     let mut cur_fill_solid = false;
     let mut cur_fill_color: Option<String> = None;
-    let mut cur_xf: Option<(u32, usize, usize)> = None; // (numFmtId, fontId, fillId)
+    let mut cur_border: Option<Borders> = None;
+    // 当前正在读的边名(top/right/bottom/left)+ 其 style(颜色在其 <color> 子元素里)
+    let mut cur_side: Option<(String, Option<String>)> = None;
+    let mut cur_xf: Option<(u32, usize, usize, usize)> = None; // (numFmtId, fontId, fillId, borderId)
     let mut cur_align: Option<String> = None;
 
     loop {
@@ -604,6 +634,34 @@ fn read_style_table(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> StyleTable {
                             cur_fill_color = Some(rgb);
                         }
                     }
+                    "borders" => in_borders = true,
+                    "border" if in_borders => {
+                        cur_border = Some(Borders::default());
+                        if empty {
+                            borders.push(Borders::default());
+                            cur_border = None;
+                        }
+                    }
+                    "left" | "right" | "top" | "bottom" if cur_border.is_some() => {
+                        let style = attr(&e, "style");
+                        // 无 style(或 none)= 无边框;有 style 才成边,颜色待 <color> 子元素
+                        if style.as_deref().is_some_and(|s| s != "none") {
+                            cur_side = Some((n.clone(), style));
+                            if empty {
+                                apply_side(
+                                    cur_border.as_mut().unwrap(),
+                                    &n,
+                                    &cur_side.take().unwrap().1,
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                    "color" if cur_side.is_some() => {
+                        let rgb = attr(&e, "rgb").map(|s| normalize_argb(&s));
+                        let (side_name, style) = cur_side.take().unwrap();
+                        apply_side(cur_border.as_mut().unwrap(), &side_name, &style, rgb);
+                    }
                     "xf" if in_cellxfs => {
                         let numfmt = attr(&e, "numFmtId")
                             .and_then(|s| s.parse::<u32>().ok())
@@ -614,12 +672,16 @@ fn read_style_table(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> StyleTable {
                         let fill_id = attr(&e, "fillId")
                             .and_then(|s| s.parse::<usize>().ok())
                             .unwrap_or(0);
+                        let border_id = attr(&e, "borderId")
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(0);
                         if empty {
                             push_xf(
-                                &mut table, &custom, &fonts, &fills, numfmt, font_id, fill_id, None,
+                                &mut table, &custom, &fonts, &fills, &borders, numfmt, font_id,
+                                fill_id, border_id, None,
                             );
                         } else {
-                            cur_xf = Some((numfmt, font_id, fill_id));
+                            cur_xf = Some((numfmt, font_id, fill_id, border_id));
                             cur_align = None;
                         }
                     }
@@ -632,6 +694,7 @@ fn read_style_table(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> StyleTable {
             Ok(Event::End(e)) => match local_end(&e).as_str() {
                 "fonts" => in_fonts = false,
                 "fills" => in_fills = false,
+                "borders" => in_borders = false,
                 "cellXfs" => in_cellxfs = false,
                 "font" => {
                     if let Some(f) = cur_font.take() {
@@ -643,16 +706,23 @@ fn read_style_table(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> StyleTable {
                         fills.push(cur_fill_color.take());
                     }
                 }
+                "border" => {
+                    if let Some(b) = cur_border.take() {
+                        borders.push(b);
+                    }
+                }
                 "xf" => {
-                    if let Some((numfmt, font_id, fill_id)) = cur_xf.take() {
+                    if let Some((numfmt, font_id, fill_id, border_id)) = cur_xf.take() {
                         push_xf(
                             &mut table,
                             &custom,
                             &fonts,
                             &fills,
+                            &borders,
                             numfmt,
                             font_id,
                             fill_id,
+                            border_id,
                             cur_align.take(),
                         );
                     }
@@ -674,9 +744,11 @@ fn push_xf(
     custom: &std::collections::HashMap<u32, String>,
     fonts: &[(bool, bool, Option<String>)],
     fills: &[Option<String>],
+    borders: &[Borders],
     numfmt_id: u32,
     font_id: usize,
     fill_id: usize,
+    border_id: usize,
     align: Option<String>,
 ) {
     let code = custom
@@ -689,6 +761,7 @@ fn push_xf(
         "left" | "center" | "right" => Some(a),
         _ => None,
     });
+    let border = borders.get(border_id).filter(|b| !b.is_empty()).cloned();
     table.codes.push(code);
     table.fmts.push(CellFmt {
         bold,
@@ -696,7 +769,30 @@ fn push_xf(
         color,
         fill,
         align,
+        border,
     });
+}
+
+/// 把一条边(top/right/bottom/left)按 style + 颜色写入 Borders。
+/// style → 线宽:thin/hair→1、medium/dashed/dotted→1.5、thick→2.5、double→2;缺省 1。
+fn apply_side(b: &mut Borders, side: &str, style: &Option<String>, color: Option<String>) {
+    let width = match style.as_deref() {
+        Some("thick") => 2.5,
+        Some("medium") | Some("mediumDashed") => 1.5,
+        Some("double") => 2.0,
+        _ => 1.0,
+    };
+    let s = BorderSide {
+        width,
+        color: color.unwrap_or_else(|| "8c959f".to_string()),
+    };
+    match side {
+        "top" => b.top = Some(s),
+        "right" => b.right = Some(s),
+        "bottom" => b.bottom = Some(s),
+        "left" => b.left = Some(s),
+        _ => {}
+    }
 }
 
 /// ARGB(`FFRRGGBB`)或 RGB(`RRGGBB`)→ 6 位 RRGGBB(大写)。非法返回原样上限 6 位。
@@ -1034,12 +1130,12 @@ mod tests {
             // styles:cellXfs[0]=默认;cellXfs[1]=numFmtId 9(0%);cellXfs[2]=自定义 164
             put(
                 "xl/styles.xml",
-                r##"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.00"/></numFmts><fonts count="2"><font/><font><b/><color rgb="FFFF0000"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill></fills><cellXfs count="4"><xf numFmtId="0"/><xf numFmtId="9" applyNumberFormat="1"/><xf numFmtId="164" applyNumberFormat="1"/><xf numFmtId="0" fontId="1" fillId="2" applyFont="1" applyFill="1"><alignment horizontal="center"/></xf></cellXfs></styleSheet>"##,
+                r##"<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.00"/></numFmts><fonts count="2"><font/><font><b/><color rgb="FFFF0000"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill></fills><borders count="2"><border><left/><right/><top/><bottom/></border><border><left style="thin"><color rgb="FF0000FF"/></left><right style="thin"><color rgb="FF0000FF"/></right><top style="thick"><color rgb="FF0000FF"/></top><bottom style="thin"><color rgb="FF0000FF"/></bottom></border></borders><cellXfs count="5"><xf numFmtId="0"/><xf numFmtId="9" applyNumberFormat="1"/><xf numFmtId="164" applyNumberFormat="1"/><xf numFmtId="0" fontId="1" fillId="2" applyFont="1" applyFill="1"><alignment horizontal="center"/></xf><xf numFmtId="164" borderId="1" applyNumberFormat="1" applyBorder="1"/></cellXfs></styleSheet>"##,
             );
-            // A1=0.25 s=1(百分比);B1=1234.5 s=2(#,##0.00);A2 s=3(粗+红字+黄底+居中);合并 A2:B2
+            // A1=0.25 s=1(百分比);B1=1234.5 s=4(#,##0.00 + 蓝边框);A2 s=3(粗+红字+黄底+居中);合并 A2:B2
             put(
                 "xl/worksheets/sheet1.xml",
-                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" s="1"><v>0.25</v></c><c r="B1" s="2"><v>1234.5</v></c></row><row r="2"><c r="A2" s="3" t="inlineStr"><is><t>合并</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A2:B2"/></mergeCells></worksheet>"#,
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" s="1"><v>0.25</v></c><c r="B1" s="4"><v>1234.5</v></c></row><row r="2"><c r="A2" s="3" t="inlineStr"><is><t>合并</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A2:B2"/></mergeCells></worksheet>"#,
             );
             w.finish().unwrap();
         }
@@ -1064,6 +1160,24 @@ mod tests {
         assert_eq!(f.color.as_deref(), Some("FF0000"));
         assert_eq!(f.fill.as_deref(), Some("FFFF00"));
         assert_eq!(f.align.as_deref(), Some("center"));
+        // B1(row0,col1)= 蓝色边框(上边 thick=2.5,其余 thin=1)
+        let bf = s
+            .formats
+            .iter()
+            .find(|&&(r, c, _)| (r, c) == (0, 1))
+            .map(|(_, _, f)| f)
+            .expect("B1 应有样式");
+        let b = bf.border.as_ref().expect("B1 应有边框");
+        assert_eq!(b.top.as_ref().unwrap().color, "0000FF");
+        assert!(
+            (b.top.as_ref().unwrap().width - 2.5).abs() < 0.01,
+            "top thick"
+        );
+        assert!(
+            (b.left.as_ref().unwrap().width - 1.0).abs() < 0.01,
+            "left thin"
+        );
+        assert!(b.bottom.is_some() && b.right.is_some());
     }
 
     /// 构造带内嵌图片(twoCellAnchor)的最小 xlsx。
