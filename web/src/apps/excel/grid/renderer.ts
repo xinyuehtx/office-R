@@ -79,6 +79,7 @@ import {
   type OverlayImage,
   type OverlayMerge,
   type OverlayChart,
+  type OverlaySparkline,
 } from "./layers";
 import {
   anchorTile,
@@ -247,6 +248,8 @@ export class GridRenderer {
   private merges: OverlayMerge[] = [];
   /** 内嵌图表(xlsx)。 */
   private charts: OverlayChart[] = [];
+  /** 单元格内迷你图(xlsx)。 */
+  private sparklines: OverlaySparkline[] = [];
   private selectionRange: { row0: number; row1: number; col0: number; col1: number } | null = null;
 
   /** 当前瓦片;`null` 表示还没画过。 */
@@ -355,6 +358,7 @@ export class GridRenderer {
     this.images = [];
     this.merges = [];
     this.charts = [];
+    this.sparklines = [];
     this.windowCache = null;
     this.tile = null;
     this.sheetSetAt = this.now();
@@ -553,6 +557,12 @@ export class GridRenderer {
   /** 设置内嵌图表(xlsx);在覆盖层绘制。 */
   setCharts(charts: OverlayChart[]): void {
     this.charts = charts;
+    this.invalidate("overlay");
+  }
+
+  /** 设置单元格内迷你图(xlsx)。 */
+  setSparklines(sparklines: OverlaySparkline[]): void {
+    this.sparklines = sparklines;
     this.invalidate("overlay");
   }
 
@@ -851,6 +861,7 @@ export class GridRenderer {
           selectionRange: this.selectionRange,
           images: this.images,
           charts: this.charts,
+          sparklines: this.sparklines,
           merges: this.merges,
           fontSize: this.layout.fontSize,
           fitter: this.fitter,

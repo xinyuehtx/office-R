@@ -19,8 +19,9 @@
 //! **图表**(`xl/charts/chartN.xml`:柱/线/饼 的系列 `numCache` + 类别 `strCache` + 标题)进
 //! `XlsxSheet::charts`,网格覆盖层绘制简单柱/线/饼图。
 //! **列宽**(`col@width`)与**冻结窗格**(`sheetView/pane`)进 `XlsxSheet`,网格应用原始列宽 + 自动冻结。
-//! **非目标**:迷你图(sparkline,x14 extLst)、数据条/图标集条件格式、公式型 cfRule、图表坐标轴/图例、
-//! 变高行(网格假定等高行)。
+//! **迷你图**(`extLst` 的 `x14:sparklineGroups`:类型 + `xm:f` 数据范围 → 取值、`xm:sqref` 宿主格)进
+//! `XlsxSheet::sparklines`,网格在宿主单元格内画折线/柱。
+//! **非目标**:数据条/图标集条件格式、公式型 cfRule、图表坐标轴/图例、变高行(网格假定等高行)。
 
 use std::io::{Cursor, Read};
 
@@ -54,6 +55,20 @@ pub struct XlsxSheet {
     /// 冻结窗格:顶部行数 / 左侧列数(来自 `sheetView/pane`)。
     pub freeze_rows: u32,
     pub freeze_cols: u32,
+    /// 迷你图:宿主单元格 + 类型 + 数据值(已从数据范围取出)。
+    pub sparklines: Vec<XlsxSparkline>,
+}
+
+/// 单元格内迷你图(只读渲染)。
+#[derive(Debug, Clone)]
+pub struct XlsxSparkline {
+    /// 宿主单元格(0 基)。
+    pub row: u32,
+    pub col: u32,
+    /// 类型:`"line"` / `"column"` / `"stacked"`。
+    pub kind: String,
+    /// 数据值(空单元格计 0)。
+    pub values: Vec<f64>,
 }
 
 /// 内嵌图表(只读渲染)。
@@ -223,6 +238,33 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
         let mut col_widths: Vec<(u32, f64)> = geom.col_widths.into_iter().collect();
         col_widths.sort_by_key(|&(c, _)| c);
 
+        // 迷你图:把数据范围(去掉 `Sheet!` 前缀)解析成单元格,从显示表取数值
+        let sparklines: Vec<XlsxSparkline> = geom
+            .sparklines
+            .into_iter()
+            .filter_map(|(r, c, kind, f)| {
+                let range = f.rsplit('!').next().unwrap_or(&f).replace('$', "");
+                let (r0, c0, r1, c1) = parse_a1_range(&range)?;
+                let mut values = Vec::new();
+                for rr in r0..=r1 {
+                    for cc in c0..=c1 {
+                        let v = sheet
+                            .cell(rr as usize, cc as usize)
+                            .trim()
+                            .parse::<f64>()
+                            .ok();
+                        values.push(v.unwrap_or(0.0));
+                    }
+                }
+                Some(XlsxSparkline {
+                    row: r,
+                    col: c,
+                    kind,
+                    values,
+                })
+            })
+            .collect();
+
         sheets.push(XlsxSheet {
             name,
             sheet,
@@ -234,6 +276,7 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
             col_widths,
             freeze_rows: geom.freeze_rows,
             freeze_cols: geom.freeze_cols,
+            sparklines,
         });
     }
 
@@ -1019,6 +1062,8 @@ struct SheetGeom {
     /// 冻结的顶部行数 / 左侧列数(来自 `sheetView/pane`)。
     freeze_rows: u32,
     freeze_cols: u32,
+    /// 迷你图:`(host_row, host_col, 类型, 数据范围 A1)`(类型 line/column/stacked)。
+    sparklines: Vec<(u32, u32, String, String)>,
 }
 
 fn read_cell_styles(zip: &mut ZipArchive<Cursor<Vec<u8>>>, path: &str) -> SheetGeom {
@@ -1029,11 +1074,33 @@ fn read_cell_styles(zip: &mut ZipArchive<Cursor<Vec<u8>>>, path: &str) -> SheetG
     };
     let mut reader = XmlReader::from_str(&xml);
     let mut buf = Vec::new();
+    // 迷你图累积:当前组类型 + 当前 sparkline 的 f(数据范围)/sqref(宿主格)
+    let mut spark_type = String::from("line");
+    let mut cur_f: Option<String> = None;
+    let mut cur_sqref: Option<String> = None;
+    let mut in_f = false;
+    let mut in_sqref = false;
+    let mut txt = String::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 let n = local(&e);
                 match n.as_str() {
+                    "sparklineGroup" => {
+                        spark_type = attr(&e, "type").unwrap_or_else(|| "line".into());
+                    }
+                    "sparkline" => {
+                        cur_f = None;
+                        cur_sqref = None;
+                    }
+                    "f" => {
+                        in_f = true;
+                        txt.clear();
+                    }
+                    "sqref" => {
+                        in_sqref = true;
+                        txt.clear();
+                    }
                     "c" => {
                         if let (Some(rc), Some(s)) = (
                             attr(&e, "r").and_then(|r| parse_a1(&r)),
@@ -1073,6 +1140,31 @@ fn read_cell_styles(zip: &mut ZipArchive<Cursor<Vec<u8>>>, path: &str) -> SheetG
                     _ => {}
                 }
             }
+            Ok(Event::Text(t)) => {
+                if in_f || in_sqref {
+                    if let Ok(s) = t.decode() {
+                        txt.push_str(&s);
+                    }
+                }
+            }
+            Ok(Event::End(e)) => match local_end(&e).as_str() {
+                "f" => {
+                    in_f = false;
+                    cur_f = Some(txt.trim().to_string());
+                }
+                "sqref" => {
+                    in_sqref = false;
+                    cur_sqref = Some(txt.trim().to_string());
+                }
+                "sparkline" => {
+                    if let (Some(f), Some(sq)) = (cur_f.take(), cur_sqref.take()) {
+                        if let Some((r, c)) = parse_a1(&sq) {
+                            g.sparklines.push((r, c, spark_type.clone(), f));
+                        }
+                    }
+                }
+                _ => {}
+            },
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
@@ -1616,6 +1708,50 @@ mod tests {
             .expect("media");
         assert_eq!(m.mime, "image/png");
         assert!(!m.data.is_empty());
+    }
+
+    #[test]
+    fn parses_sparklines() {
+        use std::io::{Cursor, Write};
+        use zip::write::SimpleFileOptions;
+        use zip::{CompressionMethod, ZipWriter};
+        let mut buf = Vec::new();
+        {
+            let mut w = ZipWriter::new(Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            let mut put = |name: &str, data: &str| {
+                w.start_file(name, opts).unwrap();
+                w.write_all(data.as_bytes()).unwrap();
+            };
+            put(
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            );
+            put(
+                "_rels/.rels",
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+            );
+            put(
+                "xl/workbook.xml",
+                r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+            );
+            put(
+                "xl/_rels/workbook.xml.rels",
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+            );
+            // B1..E1 = 1,3,2,5;A1 宿主一条 line 迷你图,数据 S!B1:E1
+            put(
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>趋势</t></is></c><c r="B1"><v>1</v></c><c r="C1"><v>3</v></c><c r="D1"><v>2</v></c><c r="E1"><v>5</v></c></row></sheetData><extLst><ext uri="{05C60535-1F16-4fd2-B633-F4F36F0B64E0}"><x14:sparklineGroups xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:sparklineGroup type="column"><x14:sparklines><x14:sparkline><xm:f xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main">S!B1:E1</xm:f><xm:sqref xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main">A1</xm:sqref></x14:sparkline></x14:sparklines></x14:sparklineGroup></x14:sparklineGroups></ext></extLst></worksheet>"#,
+            );
+            w.finish().unwrap();
+        }
+        let wb = parse(&buf).expect("解析");
+        let sp = &wb.sheets[0].sparklines;
+        assert_eq!(sp.len(), 1);
+        assert_eq!((sp[0].row, sp[0].col), (0, 0), "宿主 A1");
+        assert_eq!(sp[0].kind, "column");
+        assert_eq!(sp[0].values, vec![1.0, 3.0, 2.0, 5.0]);
     }
 
     #[test]

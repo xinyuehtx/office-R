@@ -116,6 +116,15 @@ export interface SheetChart {
   categories: string[];
 }
 
+/** 单元格内迷你图。 */
+export interface SheetSparkline {
+  row: number;
+  col: number;
+  /** "line" / "column" / "stacked"。 */
+  kind: string;
+  values: number[];
+}
+
 /** 内嵌图片(锚定单元格 + object URL)。 */
 export interface SheetImage {
   /** 左上锚单元格(0 基)。 */
@@ -188,6 +197,8 @@ export interface SheetHandle {
   colWidthsPx?: [number, number][];
   /** xlsx 冻结窗格 `[rows, cols]`;换表时自动应用。 */
   freeze?: [number, number];
+  /** xlsx 单元格内迷你图。 */
+  sparklines?: SheetSparkline[];
   /** 释放底层资源(WASM 线性内存里的表格)。 */
   dispose(): void;
 }

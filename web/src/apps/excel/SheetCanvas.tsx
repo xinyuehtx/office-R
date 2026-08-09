@@ -178,6 +178,8 @@ export function SheetCanvas({ sheet, tracer }: SheetCanvasProps) {
 
     // 内嵌图表(xlsx):直接透传给覆盖层
     renderer.setCharts(sheet.charts ?? []);
+    // 单元格内迷你图(xlsx)
+    renderer.setSparklines(sheet.sparklines ?? []);
 
     // xlsx 列宽覆盖(冻结由下方专门的 effect 处理)
     for (const [col, px] of sheet.colWidthsPx ?? []) {

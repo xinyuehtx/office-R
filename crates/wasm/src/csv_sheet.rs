@@ -745,6 +745,28 @@ impl WasmWorkbook {
         Ok(arr.into())
     }
 
+    /// 第 `i` 张工作表的迷你图 `[{row,col,kind,values:[..]}, ...]`。
+    pub fn sparklines(&self, i: usize) -> Result<JsValue, JsValue> {
+        let s = self
+            .sheets
+            .get(i)
+            .ok_or_else(|| JsValue::from_str("工作表下标越界"))?;
+        let arr = js_sys::Array::new();
+        for sp in &s.sparklines {
+            let o = js_sys::Object::new();
+            js_sys::Reflect::set(&o, &"row".into(), &JsValue::from_f64(sp.row as f64))?;
+            js_sys::Reflect::set(&o, &"col".into(), &JsValue::from_f64(sp.col as f64))?;
+            js_sys::Reflect::set(&o, &"kind".into(), &JsValue::from_str(&sp.kind))?;
+            let vals = js_sys::Array::new();
+            for &v in &sp.values {
+                vals.push(&JsValue::from_f64(v));
+            }
+            js_sys::Reflect::set(&o, &"values".into(), &vals)?;
+            arr.push(&o);
+        }
+        Ok(arr.into())
+    }
+
     /// 第 `i` 张工作表的冻结窗格 `[rows, cols]`。
     pub fn freeze(&self, i: usize) -> Result<JsValue, JsValue> {
         let s = self

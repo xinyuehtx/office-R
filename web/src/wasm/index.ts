@@ -294,6 +294,7 @@ export async function loadXlsx(bytes: Uint8Array): Promise<XlsxWorkbookHandle> {
       const cw = wb.colWidths(index) as [number, number][];
       handle.colWidthsPx = cw.map(([c, w]) => [c, Math.round(w * 7 + 5)]);
       handle.freeze = wb.freeze(index) as [number, number];
+      handle.sparklines = wb.sparklines(index) as import("../apps/shared/sheet").SheetSparkline[];
       return handle;
     },
     dispose() {
