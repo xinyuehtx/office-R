@@ -5,7 +5,7 @@
  * 因此同一份幻灯可在不同尺寸(缩略图/全屏)下渲染。
  */
 
-import type { Slide, Shape, Align } from "./model";
+import type { Slide, Shape, Align, SlideTable } from "./model";
 import { FONT_FAMILY } from "../excel/grid/theme";
 import { sharedMeasurer } from "../shared/textMeasure";
 
@@ -136,6 +136,82 @@ function drawPlaceholderKind(
 }
 
 /** 绘制一张幻灯到 ctx,已按 `scale` 缩放;`images` 按 embed id 提供已解码图片。 */
+/** 绘制内嵌表格:等分行高 + 按列宽比例分列,画网格线与单元格文本(裁剪防溢出)。 */
+function drawTable(
+  ctx: CanvasRenderingContext2D,
+  table: SlideTable,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  scale: number,
+) {
+  const nRows = table.rows.length;
+  const nCols = Math.max(1, ...table.rows.map((r) => r.length), table.col_widths.length);
+  // 列宽:优先用解析出的比例;否则等分
+  const totalUnits = table.col_widths.reduce((a, b) => a + b, 0);
+  const colW: number[] = [];
+  for (let c = 0; c < nCols; c += 1) {
+    if (totalUnits > 0 && table.col_widths[c] !== undefined) {
+      colW.push((table.col_widths[c] / totalUnits) * w);
+    } else {
+      colW.push(w / nCols);
+    }
+  }
+  const rowH = h / nRows;
+
+  // 白底
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x, y, w, h);
+
+  const px = Math.max(10, 13 * scale);
+  ctx.font = `${px}px ${FONT_FAMILY}`;
+  ctx.textBaseline = "middle";
+  const pad = 4 * scale;
+
+  for (let r = 0; r < nRows; r += 1) {
+    const cy = y + r * rowH;
+    // 表头行浅底
+    if (r === 0) {
+      ctx.fillStyle = "#f0f3f7";
+      ctx.fillRect(x, cy, w, rowH);
+    }
+    let cx = x;
+    for (let c = 0; c < nCols; c += 1) {
+      const cw = colW[c];
+      const text = table.rows[r]?.[c] ?? "";
+      if (text) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(cx, cy, cw, rowH);
+        ctx.clip();
+        ctx.fillStyle = r === 0 ? "#1f2328" : DEFAULT_TEXT;
+        ctx.fillText(text, cx + pad, cy + rowH / 2);
+        ctx.restore();
+      }
+      cx += cw;
+    }
+  }
+
+  // 网格线
+  ctx.strokeStyle = "#c4ccd4";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let r = 0; r <= nRows; r += 1) {
+    const gy = Math.round(y + r * rowH) + 0.5;
+    ctx.moveTo(x, gy);
+    ctx.lineTo(x + w, gy);
+  }
+  let gx = x;
+  for (let c = 0; c <= nCols; c += 1) {
+    const lx = Math.round(gx) + 0.5;
+    ctx.moveTo(lx, y);
+    ctx.lineTo(lx, y + h);
+    gx += colW[c] ?? 0;
+  }
+  ctx.stroke();
+}
+
 export function drawSlide(
   ctx: CanvasRenderingContext2D,
   slide: Slide,
@@ -161,7 +237,14 @@ export function drawSlide(
       ctx.translate(-cx, -cy);
     }
 
-    // 内嵌对象(图表/SmartArt/表格)占位
+    // 内嵌表格:真实网格 + 单元格文本
+    if (shape.table && shape.table.rows.length > 0) {
+      drawTable(ctx, shape.table, x, y, w, h, scale);
+      if (needXform) ctx.restore();
+      continue;
+    }
+
+    // 其它内嵌对象(图表/SmartArt)占位
     if (shape.placeholder_kind) {
       drawPlaceholderKind(ctx, shape.placeholder_kind, x, y, w, h, scale);
       if (needXform) ctx.restore();

@@ -38,6 +38,16 @@ export interface Shape {
   placeholder_kind?: string | null;
   /** 渐变填充两端色 [首, 末](RRGGBB);无渐变为 null。上→下线性渐变。 */
   gradient?: [string, string] | null;
+  /** 内嵌表格;非表格为 null。 */
+  table?: SlideTable | null;
+}
+
+/** 幻灯内表格。 */
+export interface SlideTable {
+  /** 各列宽(像素)。 */
+  col_widths: number[];
+  /** 行 → 各单元格纯文本。 */
+  rows: string[][];
 }
 
 export interface Slide {

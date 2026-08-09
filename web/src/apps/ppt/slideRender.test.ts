@@ -30,6 +30,8 @@ function fakeCtx() {
       lineWidth: 1,
       beginPath: () => calls.push("beginPath"),
       rect: () => calls.push("rect"),
+      clip: () => {},
+      fillRect: () => calls.push("fillRect"),
       ellipse: () => calls.push("ellipse"),
       moveTo: () => {},
       lineTo: () => {},
@@ -171,6 +173,36 @@ describe("drawSlide", () => {
     const { ctx, calls } = fakeCtx();
     drawSlide(ctx, slide, 1, new Map());
     expect(calls.some((c) => c.startsWith("fillText:SmartArt"))).toBe(true);
+  });
+
+  it("内嵌表格绘制网格线与单元格文本", () => {
+    const slide: Slide = {
+      shapes: [
+        {
+          x: 0,
+          y: 0,
+          width: 200,
+          height: 100,
+          geom: null,
+          fill: null,
+          image: null,
+          paragraphs: [],
+          placeholder_kind: "table",
+          table: {
+            col_widths: [100, 100],
+            rows: [
+              ["姓名", "分数"],
+              ["张三", "88"],
+            ],
+          },
+        },
+      ],
+    };
+    const { ctx, calls } = fakeCtx();
+    drawSlide(ctx, slide, 1, new Map());
+    expect(calls).toContain("stroke"); // 网格线
+    expect(calls.some((c) => c.startsWith("fillText:姓名"))).toBe(true);
+    expect(calls.some((c) => c.startsWith("fillText:88"))).toBe(true);
   });
 
   it("渐变填充调用 createLinearGradient 并 fill", () => {

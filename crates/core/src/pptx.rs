@@ -15,8 +15,10 @@
 //! 动画/切换标记(`p:timing`/`p:transition` → `has_animation`/`has_transition`)、
 //! 图表/SmartArt 占位(`p:graphicFrame` → `placeholder_kind`,仅占位框 + 类型标签)、
 //! 组合形状 `p:grpSp`(按 `chOff`/`chExt`→`off`/`ext` 映射子坐标,支持嵌套)、
-//! 渐变填充 `a:gradFill`(取首/末停靠色,视图上→下线性渐变)。
-//! **非目标**:动画/切换的具体时间线回放、图表/SmartArt 的真实绘制、自定义几何、图片填充、阴影效果。
+//! 渐变填充 `a:gradFill`(取首/末停靠色,视图上→下线性渐变)、
+//! 内嵌表格 `a:tbl`(列宽/行/单元格文本 → 视图绘制真实网格)。
+//! **非目标**:动画/切换的具体时间线回放、图表/SmartArt 的真实绘制、自定义几何、图片填充、阴影效果、
+//! 表格单元格合并/样式。
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -90,6 +92,18 @@ pub struct Shape {
     /// 渐变填充的两端色(首/末停靠点 `RRGGBB`);无渐变为 `None`。视图按上→下线性渐变绘制。
     #[serde(default)]
     pub gradient: Option<(String, String)>,
+    /// 内嵌表格(`a:tbl`);非表格为 `None`。有表格时视图绘制真实网格 + 单元格文本。
+    #[serde(default)]
+    pub table: Option<Table>,
+}
+
+/// 幻灯内表格(来自 `p:graphicFrame` 的 `a:tbl`)。
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+pub struct Table {
+    /// 各列宽(像素;`a:gridCol@w` EMU 换算)。
+    pub col_widths: Vec<f64>,
+    /// 行:每行是各单元格的纯文本(合并单元格的被跨单元格为空串)。
+    pub rows: Vec<Vec<String>>,
 }
 
 /// 一张幻灯片。
@@ -386,6 +400,8 @@ struct ShapeBuilder {
     placeholder_kind: Option<String>,
     /// 渐变填充停靠色(按出现顺序);finish 时取首/末为两端。
     grad_stops: Vec<String>,
+    /// 内嵌表格(累积中);无表格为 `None`。
+    table: Option<Table>,
 }
 
 impl ShapeBuilder {
@@ -407,14 +423,16 @@ impl ShapeBuilder {
                 (Some(a), Some(b)) => Some((a.clone(), b.clone())),
                 _ => None,
             },
+            table: self.table,
         }
     }
     fn is_renderable(&self) -> bool {
-        // 有显式几何(位置/尺寸)或有文本或是内容占位才渲染
+        // 有显式几何(位置/尺寸)或有文本或是内容占位或有表格才渲染
         self.width > 0.0
             || self.height > 0.0
             || !self.paragraphs.is_empty()
             || self.placeholder_kind.is_some()
+            || self.table.is_some()
     }
 }
 
@@ -507,6 +525,9 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
     let mut has_transition = false;
     // 组合形状变换栈(外→内);子形状落盘时由内到外套用映射到幻灯坐标
     let mut groups: Vec<GroupXform> = Vec::new();
+    // 表格累积:是否在表格内 / 当前单元格文本缓冲(在单元格内则文本走此处而非形状段落)
+    let mut in_cell = false;
+    let mut cell_text = String::new();
 
     while let Ok(ev) = reader.read_event_into(&mut buf) {
         match ev {
@@ -521,7 +542,37 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
                     "grpSp" => groups.push(GroupXform::default()),
                     // graphicFrame 起始:作为一个内容占位形状
                     "graphicFrame" => cur = Some(ShapeBuilder::default()),
+                    // 表格:在当前形状上开始累积
+                    "tbl" => {
+                        if let Some(b) = cur.as_mut() {
+                            b.table = Some(Table::default());
+                            b.placeholder_kind = Some("table".to_string());
+                        }
+                    }
+                    "gridCol" => {
+                        if let Some(w) = attr(&e, "w").and_then(|s| s.parse::<f64>().ok()) {
+                            if let Some(t) = cur.as_mut().and_then(|b| b.table.as_mut()) {
+                                t.col_widths.push(emu(w));
+                            }
+                        }
+                    }
+                    "tr" => {
+                        if let Some(t) = cur.as_mut().and_then(|b| b.table.as_mut()) {
+                            t.rows.push(Vec::new());
+                        }
+                    }
+                    "tc" if cur.as_ref().and_then(|b| b.table.as_ref()).is_some() => {
+                        // 新单元格:开始文本累积
+                        in_cell = true;
+                        cell_text.clear();
+                    }
                     _ => {}
+                }
+                // 表格内的 gridCol/tr/tc(及其 Empty 形式)不走形状文本路径
+                if in_cell || cur.as_ref().and_then(|b| b.table.as_ref()).is_some() {
+                    stack.push(name);
+                    buf.clear();
+                    continue;
                 }
                 handle_start(
                     &e,
@@ -546,6 +597,19 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
                         b.placeholder_kind = graphic_kind(&attr(&e, "uri").unwrap_or_default());
                     }
                 }
+                // 表格列宽(gridCol 常为空元素)
+                if name == "gridCol" {
+                    if let Some(w) = attr(&e, "w").and_then(|s| s.parse::<f64>().ok()) {
+                        if let Some(t) = cur.as_mut().and_then(|b| b.table.as_mut()) {
+                            t.col_widths.push(emu(w));
+                        }
+                    }
+                }
+                // 表格内不走形状文本/填充路径
+                if in_cell || cur.as_ref().and_then(|b| b.table.as_ref()).is_some() {
+                    buf.clear();
+                    continue;
+                }
                 // 组 xfrm 的 off/ext/chOff/chExt:无活动形状(cur=None)且在组内时,填入当前组
                 let group_ctx = cur.is_none() && !groups.is_empty();
                 if group_ctx && matches!(name.as_str(), "off" | "ext" | "chOff" | "chExt") {
@@ -566,6 +630,24 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
             }
             Event::End(_e) => {
                 let name = stack.pop().unwrap_or_default();
+                // 表格内元素:tc 收尾落一格文本;其它表格内元素跳过(不触发形状文本收尾)。
+                // 唯 graphicFrame 例外——它是外层容器,End 时才把带表格的形状落盘。
+                let in_table = cur.as_ref().and_then(|b| b.table.as_ref()).is_some();
+                if name == "tc" {
+                    if let Some(t) = cur.as_mut().and_then(|b| b.table.as_mut()) {
+                        if let Some(row) = t.rows.last_mut() {
+                            row.push(cell_text.trim().to_string());
+                        }
+                    }
+                    in_cell = false;
+                    cell_text.clear();
+                    buf.clear();
+                    continue;
+                }
+                if in_table && name != "graphicFrame" {
+                    buf.clear();
+                    continue;
+                }
                 if name == "grpSp" {
                     groups.pop();
                 } else {
@@ -605,8 +687,10 @@ fn parse_slide(xml: &str, ctx: &SlideCtx) -> Slide {
             }
             Event::Text(t) => {
                 if stack.last().map(|s| s.as_str()) == Some("t") {
-                    if let Some(run) = cur_run.as_mut() {
-                        if let Ok(s) = t.decode() {
+                    if let Ok(s) = t.decode() {
+                        if in_cell {
+                            cell_text.push_str(&s);
+                        } else if let Some(run) = cur_run.as_mut() {
                             run.text.push_str(&s);
                         }
                     }
@@ -1438,6 +1522,39 @@ mod tests {
             Some("1F3864"),
             "应继承母版 title 颜色"
         );
+    }
+
+    #[test]
+    fn parses_slide_table() {
+        // graphicFrame 内嵌 2 列 × 2 行表格
+        let slide = r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree>
+          <p:graphicFrame><p:xfrm><a:off x="0" y="0"/><a:ext cx="3657600" cy="1828800"/></p:xfrm>
+            <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">
+              <a:tbl><a:tblGrid><a:gridCol w="1828800"/><a:gridCol w="1828800"/></a:tblGrid>
+                <a:tr h="457200">
+                  <a:tc><a:txBody><a:p><a:r><a:t>姓名</a:t></a:r></a:p></a:txBody></a:tc>
+                  <a:tc><a:txBody><a:p><a:r><a:t>分数</a:t></a:r></a:p></a:txBody></a:tc>
+                </a:tr>
+                <a:tr h="457200">
+                  <a:tc><a:txBody><a:p><a:r><a:t>张三</a:t></a:r></a:p></a:txBody></a:tc>
+                  <a:tc><a:txBody><a:p><a:r><a:t>88</a:t></a:r></a:p></a:txBody></a:tc>
+                </a:tr>
+              </a:tbl>
+            </a:graphicData></a:graphic></p:graphicFrame>
+        </p:spTree></p:cSld></p:sld>"#;
+        let (theme, fallback, defaults) = empty_ctx();
+        let ctx = SlideCtx {
+            theme: &theme,
+            fallback: &fallback,
+            text_defaults: &defaults,
+        };
+        let shapes = parse_slide(slide, &ctx).shapes;
+        assert_eq!(shapes.len(), 1);
+        let t = shapes[0].table.as_ref().expect("应有表格");
+        assert_eq!(t.col_widths.len(), 2, "两列");
+        assert_eq!(t.rows.len(), 2, "两行");
+        assert_eq!(t.rows[0], vec!["姓名".to_string(), "分数".to_string()]);
+        assert_eq!(t.rows[1], vec!["张三".to_string(), "88".to_string()]);
     }
 
     #[test]
