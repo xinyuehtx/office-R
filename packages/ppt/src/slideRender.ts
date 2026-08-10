@@ -5,7 +5,7 @@
  * 因此同一份幻灯可在不同尺寸(缩略图/全屏)下渲染。
  */
 
-import type { Slide, Shape, Align, SlideTable } from "@tengxiaohyx/office-ppt";
+import type { Slide, Shape, Align, SlideTable } from "./model";
 import { FONT_FAMILY } from "@tengxiaohyx/office-shared";
 import { sharedMeasurer } from "@tengxiaohyx/office-shared";
 import { drawChartInRect } from "@tengxiaohyx/office-shared";

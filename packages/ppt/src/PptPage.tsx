@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FileUpload } from "@tengxiaohyx/office-shared";
-import { loadPptx } from "@tengxiaohyx/office-ppt";
-import type { PptDocument } from "@tengxiaohyx/office-ppt";
-import { imageKey } from "@tengxiaohyx/office-ppt";
+import { loadPptx } from "./wasm";
+import type { PptDocument } from "./model";
+import { imageKey } from "./model";
 import { drawSlide, fitScale, applyTransition, TRANSITION_MS } from "./slideRender";
+import "@tengxiaohyx/office-shared/page.css";
+import "./ppt.css";
 
 type Status = "idle" | "loading" | "ready" | "error";
 

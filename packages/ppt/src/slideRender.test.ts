@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { fitScale, drawSlide, applyTransition } from "./slideRender";
-import type { Slide } from "@tengxiaohyx/office-ppt";
+import type { Slide } from "./model";
 
 describe("fitScale", () => {
   it("等比缩放并居中", () => {
