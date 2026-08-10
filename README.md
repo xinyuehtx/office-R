@@ -51,8 +51,9 @@ PPT 占位符**继承版式/母版几何**、解析**主题配色**并**继承�
 # 1. 安装 wasm-pack(若未安装)
 curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
 
-# 2. 构建 WASM 内核(产物输出到 web/src/wasm/pkg)
-wasm-pack build crates/wasm --target web --out-dir ../../web/src/wasm/pkg --out-name office_wasm
+# 2. 构建三份 WASM 内核(每应用一份,产物落到各自包的 pkg/)
+for a in word excel ppt; do \
+  wasm-pack build crates/$a-wasm --target web --out-dir ../../packages/$a/pkg --out-name office_${a}_wasm; done
 
 # 3. 安装前端依赖并启动
 pnpm install

@@ -12,48 +12,48 @@ office-R 是一个**统一的 Office 三件套应用**(文档 / 表格 / 演示)
 
 ## 分层
 
+这是一个 **monorepo**:三个应用(Word / Excel / PPT)各自是可独立使用的单元 ——
+一个 Rust 解析 crate + 一个 wasm cdylib + 一个 npm 包。演示站 `web/` 只是把三者
+组合起来的壳。拆分动机与依赖测绘见 [RFC-0007](./rfcs/0007-monorepo-split.md)。
+
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  Web 视图层 (web/, React + Vite + TS)                          │
-│  ├─ App.tsx                顶部 Tab:文档 / 表格 / 演示          │
-│  ├─ apps/word · apps/ppt   上传 → 解析 → canvas 渲染             │
-│  ├─ apps/excel/            CSV / xlsx 表格视图                   │
-│  │   ├─ ExcelPage.tsx      页面:上传 / 状态 / 元信息            │
-│  │   ├─ SheetCanvas.tsx    交互:尺寸自适应 / 滚轮 / 键盘 / 拖拽  │
-│  │   └─ grid/              渲染管线(见下)                      │
-│  ├─ apps/shared/           FileUpload / sheet 契约 /            │
-│  │                         useOfficeFile / useCsvFile /         │
-│  │                         SheetHandle 接口 / logger             │
-│  └─ wasm/                  WASM 封装 + csvWorker(解析线程)      │
-└───────────────┬──────────────────────────────────────────────┘
-                │ wasm-bindgen
-┌───────────────▼──────────────────────────────────────────────┐
-│  绑定层 office-wasm (crates/wasm/)                             │
-│  version / detect / render / parseCsvPacked(含公式求值)/       │
-│  WasmSheet(过滤/冻结)/ WasmWordDoc / WasmPresentation           │
-│  log.rs:与前端同格式的分级日志                                  │
-└───────────────┬──────────────────────────────────────────────┘
-                │ 纯 Rust 调用
-┌───────────────▼──────────────────────────────────────────────┐
-│  计算内核 office-core (crates/core/)                           │
-│  ├─ format.rs   detect_format() 识别格式(含 CSV 文本判定)      │
-│  ├─ sheet.rs    Sheet:紧凑表格模型 / 窗口取数 / 列宽度量        │
-│  ├─ csv/        CSV 解析:decode(编码)· dialect(分隔符)      │
-│  │              · error(thiserror)· mod(解析主流程)         │
-│  ├─ formula/    公式引擎:token→parser→ast→eval + functions/    │
-│  │              值层 Workbook,语义对齐 Excel                  │
-│  ├─ filter.rs   列过滤:按列条件全表扫描 → 命中行下标            │
-│  ├─ numfmt.rs   Excel 数字格式码 → 显示文本                      │
-│  ├─ docx.rs     Word:docx-rs 读路径 → 平面化文档模型 + 图片      │
-│  ├─ pptx.rs     PPT:zip+quick-xml 解析 → 幻灯模型 + 图片         │
-│  ├─ render.rs   RenderResult 摘要结构                           │
-│  ├─ word.rs · excel.rs · ppt.rs   docx / xlsx / pptx 摘要解析   │
-│  └─ lib.rs      render() 统一分发入口                            │
-└──────────────────────────────────────────────────────────────┘
+演示站 web/(React + Vite,只有壳:App.tsx Tab + main + 外壳 CSS)
+  └─ import { WordPage / ExcelPage / PptPage } from 三个 npm 包
+
+npm 包(packages/,exports 直指源码 .ts,pnpm workspace)
+  ├─ @tengxiaohyx/office-shared   logger / textMeasure / chartDraw / FileUpload
+  │                               / fonts / page.css / testing(三应用共用叶子)
+  ├─ @tengxiaohyx/office-word     model + wasm 加载器 + WordPage + 布局
+  ├─ @tengxiaohyx/office-excel    SheetHandle + grid 渲染管线 + SheetCanvas
+  │                               + CSV/xlsx wasm 加载器 + csvWorker
+  └─ @tengxiaohyx/office-ppt      model + wasm 加载器 + PptPage + slideRender
+        │  每个应用包内含自己的 pkg/(wasm-pack 产物,不入库)
+        ▼ wasm-bindgen
+wasm cdylib(crates/,每应用一份独立产物)
+  ├─ office-word-wasm    WasmWordDoc          → office-word
+  ├─ office-excel-wasm   WasmSheet/WasmWorkbook/parseCsvPacked → office-excel + office-core
+  ├─ office-ppt-wasm     WasmPresentation     → office-ppt
+  └─ office-wasm-log     三个 cdylib 共用的 console 日志桥(格式一致)
+        │  纯 Rust 调用
+        ▼
+解析 crate(crates/)
+  ├─ office-word    docx.rs  → docx-rs      (不依赖 office-core)
+  ├─ office-excel   xlsx.rs  → calamine     (依赖 office-core + office-ooxml)
+  ├─ office-ppt     pptx.rs               (只依赖 office-ooxml)
+  ├─ office-ooxml   chart + OPC/XML 共享原语(local/attr/mime_of/emu/rels)
+  └─ office-core    表格内核:sheet / csv / formula / numfmt / serial /
+                    limits / filter / format(无任何格式解析依赖)
 ```
 
-**关键设计**:`office-core` 平台无关、不依赖任何浏览器 API,因此可原生 `cargo test`;
-`office-wasm` 只做类型转换、跨边界搬运与日志,不含业务逻辑。
+**关键设计**:
+- **依赖是无环 DAG,且严格隔离**:`office-core` 不含 calamine/docx-rs/quick-xml/zip;
+  Word 与 PPT **不依赖** `office-core`(它们与表格内核无关);只有 Excel 需要内核。
+  `cargo tree` 可逐条验证。
+- **每应用一份 wasm**:只装 `@tengxiaohyx/office-excel` 的消费方不会拿到 docx-rs
+  或 pptx 的字节(word 0.68M / excel 0.83M / ppt 0.25M,拆分前单体是 1.20M)。
+- **CSV 与 xlsx 同在 office-excel-wasm**:`WasmWorkbook::sheet(i) -> WasmSheet`
+  要求两者在同一个 wasm 模块里(wasm-bindgen 类型不能跨模块实例传递)。
+- `office-core` 平台无关、可原生 `cargo test`;wasm 层只做类型转换与跨边界搬运。
 
 ## 核心依赖
 
@@ -135,7 +135,7 @@ row_starts: 每行首个单元格的下标
 
 ## canvas 渲染管线
 
-位于 `web/src/apps/excel/grid/`,分四段,每段可独立验证:
+位于 `packages/excel/src/grid/`,分四段,每段可独立验证:
 
 ```
 ① 数据    SheetHandle + 按瓦片取数的窗口缓存(比瓦片再大两圈,便于增量复用)
@@ -198,7 +198,7 @@ DOM 只承载:容器、交互层、状态栏,以及供读屏软件播报当前�
 
 ## 可观测性
 
-前端 `apps/shared/logger.ts` 与 WASM `crates/wasm/src/log.rs` **同格式**输出:
+前端 `office-shared` 的 `logger.ts` 与 `office-wasm-log` **同格式**输出:
 
 ```
 [office-R][web ][info][a1b2c3] file.open name=demo.csv bytes=41672736
@@ -293,29 +293,29 @@ CI 的 `rust` job 用 `--check` 逐字节比对,保证它们不与生成器脱�
 | --- | --- | --- |
 | 值类型 / 数字与日期格式化 | ✅ 已实现:`numfmt.rs` 独立格式层 + `serial.rs` 日历,绘制时查表 | ❌ 把格式化塞进 `Sheet` 或在绘制代码里判断内容像不像日期 |
 | 公式求值 | ✅ 已实现:独立的 `formula` 模块([值层 `Workbook`])求值,产出显示表喂给 `Sheet` | ❌ 让渲染管线感知公式 |
-| 图表 | ✅ 已实现:`core/chart.rs` 解析(xlsx/pptx 共用)+ `web/shared/chartDraw.ts` 绘制 | ❌ 混进表格渲染管线 |
+| 图表 | ✅ 已实现:`office-ooxml` 的 chart.rs 解析(xlsx/pptx 共用)+ `web/shared/chartDraw.ts` 绘制 | ❌ 混进表格渲染管线 |
 | xlsx 表格视图 | ✅ 已实现:`xlsx.rs` 产出 `Sheet`,视图层复用 `SheetHandle` 接口 | ❌ 为 xlsx 再写一套渲染 |
 | 解析资源预算 | `limits.rs` 统一常量,在各解析入口钳制 | ❌ 各模块各拍一个魔数,或干脆不设上限 |
 
-## Word / PPT 只读渲染(`crates/core/src/{docx,pptx}.rs` + `web/apps/{word,ppt}`)
+## Word / PPT 只读渲染(`crates/{word,ppt}/src/` + `packages/{word,ppt}`)
 
 见 [RFC-0006](./rfcs/0006-word-excel-ppt-readonly.md)。两条与表格并列的渲染管线,同样「重 CPU 在
 Rust、canvas 虚拟化 + 多级缓存」:
 
 - **Word**:`docx.rs` 用 `docx-rs` 读路径抽出平面化模型(段落/run/标题/对齐/列表/内联图片/表格、
-  **分栏 `sectPr`、页眉页脚、修订 ins/del 标记**);`web/word/wordLayout` 做**流式布局**产出带绝对 y
+  **分栏 `sectPr`、页眉页脚、修订 ins/del 标记**);`office-word` 的 `wordLayout` 做**流式布局**产出带绝对 y
   的绘制项(分栏为贪心分配、页眉页脚各带分隔线、修订插入蓝色/删除红色+删除线),`WordPage` 用
   **sticky canvas + spacer** 纵向虚拟化(只画视口内的项)。字号/颜色经 serde 读 docx-rs 私有字段;图片字节 → Blob object URL。
 - **PPT**:`pptx.rs` 直接用 `zip + quick-xml` 解析 PresentationML(尺寸/顺序 → rels → spTree 形状/图片,
   **旋转/翻转 `xfrm@rot/flipH/flipV`、母版 `txStyles` 文本默认样式继承、组合形状 `grpSp`、渐变 `gradFill`、
-  内嵌表格 `a:tbl`、内嵌图表 `c:chart`(复用 `core/chart.rs`)、`graphicFrame` SmartArt 占位、
+  内嵌表格 `a:tbl`、内嵌图表 `c:chart`(复用 `office-ooxml` 的 chart)、`graphicFrame` SmartArt 占位、
   `timing`/`transition` 动画时间线**),用元素名栈区分 spPr 填充与 rPr 颜色,EMU÷9525;
   动画把 `mainSeq` 里每个 `clickEffect` 记为一步,`spTgt@spid` 经 `cNvPr@id` 落到形状的 `appear_step`;
-  `web/ppt/slideRender` 按 `fitScale` 等比铺进画布(形状几何/填充、文本折行+对齐、图片、旋转仿射变换、
+  `office-ppt` 的 `slideRender` 按 `fitScale` 等比铺进画布(形状几何/填充、文本折行+对齐、图片、旋转仿射变换、
   真实表格网格与图表、SmartArt 虚线占位框+类型标签),并按 `step` 过滤未出现的形状;
   `PptPage` 提供缩略图导航、缩放、翻页(含动画/切换徽标)与**全屏演示模式**
   ——演示时点击/方向键**先逐步播完入场动画再翻页**,换页按 `transition` 类型做淡入/揭开/推入。
-- **共享文本测量**(`web/shared/textMeasure.ts`):参考 pretext,`font→segment` 两级缓存 +
+- **共享文本测量**(`packages/shared/src/textMeasure.ts`):参考 pretext,`font→segment` 两级缓存 +
   OffscreenCanvas + 字体加载失效 + 二分裁剪 + 折行,三个页面共用一个实例。
 
 ## 目录结构
@@ -323,37 +323,38 @@ Rust、canvas 虚拟化 + 多级缓存」:
 ```
 office-R/
 ├── crates/            Rust cargo workspace
-│   ├── core/          office-core:平台无关计算内核
-│   │   ├── src/csv/   CSV 解析(decode / dialect / error)
-│   │   ├── src/formula/  公式引擎(token/parser/ast/eval + functions/)
-│   │   ├── {filter,numfmt,chart,serial}.rs  过滤/numfmt/图表/日期序列数
-│   │   ├── limits.rs  解析资源预算(防畸形文件 OOM / 爆栈)
-│   │   └── {docx,xlsx,pptx}.rs  三种格式的解析入口
-│   ├── wasm/          office-wasm:wasm-bindgen 绑定 + 日志 + xlsx DTO
+│   ├── core/          office-core:表格内核(sheet/csv/formula/numfmt/serial/limits/filter/format)
+│   ├── ooxml/         office-ooxml:chart + OPC/XML 共享原语(quick-xml/zip)
+│   ├── word/          office-word:docx.rs(→ docx-rs)
+│   ├── excel/         office-excel:xlsx.rs(→ calamine + core + ooxml)
+│   ├── ppt/           office-ppt:pptx.rs(→ ooxml)
+│   ├── wasm-log/      office-wasm-log:三个 cdylib 共用的日志桥(rlib)
+│   ├── word-wasm/ · excel-wasm/ · ppt-wasm/   三个独立 cdylib
 │   └── xtask/         开发工具:e2e 夹具生成 / 漂移校验
-├── web/               React + Vite + TS 视图层(pnpm 管理)
-│   ├── src/apps/      word / excel / ppt 三页 + shared 复用
-│   │   ├── excel/grid/  canvas 表格渲染管线(瓦片/冻结/过滤)
-│   │   ├── word/        docx 模型 + 流式布局 + 虚拟化渲染
-│   │   ├── ppt/         幻灯模型 + slideRender + 演示模式
-│   │   └── shared/      textMeasure(共享测量缓存)等
-│   ├── src/wasm/      WASM 封装、解析 Worker(pkg/ 为构建产物,不入库)
-│   └── src/test/      测试基建:setup、canvas 替身、表格替身
+├── packages/          pnpm workspace 前端包(exports 直指源码 .ts)
+│   ├── shared/        @tengxiaohyx/office-shared:logger/textMeasure/chartDraw/FileUpload/fonts/page.css
+│   ├── word/          @tengxiaohyx/office-word:model + wasm 加载器 + WordPage + 布局 + pkg/
+│   ├── excel/         @tengxiaohyx/office-excel:SheetHandle + grid 渲染管线 + SheetCanvas + csvWorker + pkg/
+│   └── ppt/           @tengxiaohyx/office-ppt:model + wasm 加载器 + PptPage + slideRender + pkg/
+├── web/               演示站(壳):App.tsx Tab + main + 外壳 CSS + e2e/
 ├── docs/              RFC / Spec / Story / 报告 / 工作流 / 架构
 └── .github/workflows/ CI 与 Pages 部署
 ```
 
+各包的 `pkg/` 是 wasm-pack 产物(不入库);工具链 devDeps 集中在根 `package.json`。
+
 ## 构建与部署
 
-- WASM:`wasm-pack build crates/wasm --target web --out-dir web/src/wasm/pkg`
+- WASM(三份):`for a in word excel ppt; do wasm-pack build crates/$a-wasm --target web --out-dir packages/$a/pkg --out-name office_${a}_wasm; done`
 - 前端:`pnpm -C web build`(通过 `VITE_BASE` 设置 Pages 子路径)
-- 部署:推送 `main` → GitHub Actions 构建 WASM + 前端 → 部署到 GitHub Pages
+- 校验/测试全仓:`pnpm typecheck`(所有包)· `pnpm lint`(根 config)· `pnpm test`(vitest workspace)
+- 部署:推送 `main` → GitHub Actions 构建三份 WASM + 前端 → 部署到 GitHub Pages
 
 ### CI 拓扑(`.github/workflows/ci.yml`)
 
 ```
-wasm ──┬─→ web   (typecheck / eslint / vitest / vite build)
-       └─→ e2e   (playwright install → e2e;夹具已入库,不需要 Rust)
+wasm[word|excel|ppt] ──┬─→ web   (typecheck 全包 / eslint 根 / vitest workspace / vite build)
+   (matrix 并行,3 artifact) └─→ e2e   (playwright install → e2e;夹具已入库,不需要 Rust)
 rust      (fmt / clippy --locked / test --locked / 夹具漂移校验,与 wasm 并行)
 ```
 
