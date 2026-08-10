@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { FileUpload } from "@tengxiaohyx/office-shared";
-import { useCsvFile } from "../shared/useCsvFile";
-import { useXlsxFile } from "../shared/useXlsxFile";
+import { useCsvFile } from "./useCsvFile";
+import { useXlsxFile } from "./useXlsxFile";
 import { createTracer } from "@tengxiaohyx/office-shared";
 import { SheetCanvas } from "./SheetCanvas";
+import "@tengxiaohyx/office-shared/page.css";
+import "./excel.css";
 
 /** 支持的扩展名:CSV 家族 + xlsx。 */
 const ACCEPT = ".csv,.tsv,.txt,.xlsx";

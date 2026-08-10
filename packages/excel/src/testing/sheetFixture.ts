@@ -5,7 +5,7 @@
  * 这也反过来验证了「视图层只依赖接口、不依赖具体实现」这条分层约定。
  */
 
-import type { CellWindowData, SheetHandle, SheetMeta } from "@tengxiaohyx/office-excel";
+import type { CellWindowData, SheetHandle, SheetMeta } from "../sheet";
 
 /** 与 Rust 侧 `display_width` 对齐的宽度估算(东亚宽字符算 2)。 */
 function displayWidth(text: string): number {

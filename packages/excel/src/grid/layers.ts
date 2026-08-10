@@ -26,7 +26,7 @@ import {
 } from "./geometry";
 import { COLORS, FONT_FAMILY, SCROLLBAR_SIZE } from "./theme";
 import { drawChartInRect } from "@tengxiaohyx/office-shared";
-import type { CellStyle } from "@tengxiaohyx/office-excel";
+import type { CellStyle } from "../sheet";
 
 /** 每格视觉样式查询(xlsx);返回 null 表示默认样式。 */
 export type StyleAt = (row: number, col: number) => CellStyle | null | undefined;

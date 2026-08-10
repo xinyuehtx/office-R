@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState } from "react";
-import type { FilterSpec, SheetHandle, UniqueValues } from "@tengxiaohyx/office-excel";
+import type { FilterSpec, SheetHandle, UniqueValues } from "./sheet";
 import { columnLabel } from "./grid/labels";
 
 /** 值集过滤枚举的唯一值上限(超出后提示,避免超大列卡住 UI)。 */

@@ -2,19 +2,18 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ExcelPage } from "./ExcelPage";
-import * as excel from "@tengxiaohyx/office-excel";
-import { createFixtureSheet, fixtureMeta, makeGrid } from "../../test/sheetFixture";
+import * as csvClient from "./wasm/csvClient";
+import { createFixtureSheet, fixtureMeta, makeGrid } from "./testing/sheetFixture";
 
 // 隔离 WASM:这里验证的是页面的状态流转与展示,不是解析本身。
 // CSV 解析(createWorker / parseCsvFile)从 @tengxiaohyx/office-excel 引入,
 // 用 importActual 保留其余真实导出(SheetHandle 类型等),只替换这两个。
-vi.mock("@tengxiaohyx/office-excel", async (importActual) => ({
-  ...(await importActual<typeof import("@tengxiaohyx/office-excel")>()),
+vi.mock("./wasm/csvClient", () => ({
   createWorker: vi.fn(() => null),
   parseCsvFile: vi.fn(),
 }));
 
-const parseCsvFile = vi.mocked(excel.parseCsvFile);
+const parseCsvFile = vi.mocked(csvClient.parseCsvFile);
 
 /** 造一个解析成功的返回值。 */
 function successOutcome(

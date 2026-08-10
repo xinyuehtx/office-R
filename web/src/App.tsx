@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { WordPage } from "@tengxiaohyx/office-word";
-import { ExcelPage } from "./apps/excel/ExcelPage";
+import { ExcelPage } from "@tengxiaohyx/office-excel";
 import { PptPage } from "@tengxiaohyx/office-ppt";
 import "@tengxiaohyx/office-shared/page.css";
 import "./App.css";

@@ -44,7 +44,7 @@
  * 网格线永远压在像素中心;对外的公开方法则一律收发 CSS 像素。
  */
 
-import { flattenWindow, type SheetHandle } from "@tengxiaohyx/office-excel";
+import { flattenWindow, type SheetHandle } from "../sheet";
 import type { Tracer } from "@tengxiaohyx/office-shared";
 import {
   bodySize,

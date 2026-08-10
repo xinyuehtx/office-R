@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Tracer } from "@tengxiaohyx/office-shared";
-import { flattenWindow, type FilterSpec, type SheetHandle } from "@tengxiaohyx/office-excel";
+import { flattenWindow, type FilterSpec, type SheetHandle } from "./sheet";
 import { GridRenderer, type RendererStats } from "./grid/renderer";
 import { wheelToScrollDelta, wheelToZoomFactor } from "./grid/input";
 import { cellAddress } from "./grid/labels";

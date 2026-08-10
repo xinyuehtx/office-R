@@ -7,8 +7,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createTracer, type Tracer } from "@tengxiaohyx/office-shared";
-import type { SheetHandle } from "@tengxiaohyx/office-excel";
-import { loadXlsx, type XlsxWorkbookHandle } from "@tengxiaohyx/office-excel";
+import type { SheetHandle } from "./sheet";
+import { loadXlsx, type XlsxWorkbookHandle } from "./wasm/xlsx";
 
 /** 加载状态。 */
 export type XlsxStatus = "idle" | "reading" | "parsing" | "ready" | "error";

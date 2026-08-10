@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { GridRenderer, planScrollBlit } from "./renderer";
 import { cellTextAt, TextFitter, fontString } from "./layers";
 import { TILE_MARGIN } from "./tile";
-import { createRecordingContext, createStubLayers } from "../../../test/canvasStub";
-import { createFixtureSheet, makeGrid } from "../../../test/sheetFixture";
+import { createRecordingContext, createStubLayers } from "../testing/canvasStub";
+import { createFixtureSheet, makeGrid } from "../testing/sheetFixture";
 
 describe("planScrollBlit", () => {
   const area = { width: 400, height: 300 };

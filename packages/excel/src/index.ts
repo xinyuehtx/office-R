@@ -6,3 +6,4 @@ export * from "./sheet";
 export { loadXlsx, type XlsxWorkbookHandle } from "./wasm/xlsx";
 export { nowSerial, parseCsv, sheetFromPacked, type PackedSheetTransfer } from "./wasm/sheet";
 export { parseCsvFile, createWorker, type CsvParseOutcome } from "./wasm/csvClient";
+export { ExcelPage } from "./ExcelPage";
