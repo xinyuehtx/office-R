@@ -371,10 +371,20 @@ dependencies = [
  "csv",
  "docx-rs",
  "encoding_rs",
+ "office-ooxml",
  "quick-xml",
  "serde",
  "serde_json",
  "thiserror",
+ "zip",
+]
+
+[[package]]
+name = "office-ooxml"
+version = "0.1.0"
+dependencies = [
+ "quick-xml",
+ "serde",
  "zip",
 ]
 

@@ -26,17 +26,16 @@
 //! 表格单元格合并/样式、图表坐标轴/图例。
 
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 
+use office_ooxml::{
+    attr, emu_to_px as emu, local, local_end, mime_of, read_bytes, read_text, rels_for, rels_map,
+    Rel,
+};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader as XmlReader;
 use serde::Serialize;
 use zip::ZipArchive;
-
-/// EMU → 像素。
-fn emu(v: f64) -> f64 {
-    v / 9525.0
-}
 
 /// 段落对齐。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -183,11 +182,11 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedPpt, String> {
     let mut image_index = HashMap::new();
 
     for (idx, path) in slide_paths.iter().enumerate() {
-        let xml = match read_zip_text(&mut zip, path) {
+        let xml = match read_text(&mut zip, path) {
             Ok(x) => x,
             Err(_) => continue,
         };
-        let rels = read_slide_rels(&mut zip, path);
+        let rels = rels_for(&mut zip, path);
         let (fallback, text_defaults) = layout_master_geom(&mut zip, &rels);
         let ctx = SlideCtx {
             theme: &theme,
@@ -196,12 +195,11 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedPpt, String> {
         };
         let mut slide = parse_slide(&xml, &ctx);
         // 解析图表:形状带 chart_rid → 经 slide rels 找到 chartN.xml → 解析系列数据
-        let rels_map: HashMap<String, String> = rels.iter().cloned().collect();
+        let by_id = rels_map(&rels);
         for shape in &mut slide.shapes {
             if let Some(rid) = shape.chart_rid.take() {
-                if let Some(target) = rels_map.get(&rid) {
-                    let chart_path = normalize_media_path(target);
-                    if let Ok(cxml) = read_zip_text(&mut zip, &chart_path) {
+                if let Some(chart_path) = by_id.get(&rid) {
+                    if let Ok(cxml) = read_text(&mut zip, chart_path) {
                         shape.chart = crate::chart::parse_chart_xml(&cxml);
                     }
                 }
@@ -209,17 +207,20 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedPpt, String> {
         }
         slides.push(slide);
 
-        // 收集该幻灯用到的图片字节
-        for (embed, target) in &rels {
-            let media_path = normalize_media_path(target);
-            if let Ok(data) = read_zip_bytes(&mut zip, &media_path) {
+        // 收集该幻灯用到的图片字节。
+        // 只收 Type 以 /image 结尾的关系:一张幻灯的 rels 里必然还有 slideLayout,
+        // 往往还有 notesSlide / chart —— 早先不过滤,把这些 XML part 也当"图片"
+        // 读进内存并在前端建了 object URL。
+        for rel in rels.iter().filter(|r| r.is_kind("image")) {
+            let media_path = &rel.target;
+            if let Ok(data) = read_bytes(&mut zip, media_path) {
                 let i = images.len();
                 images.push(SlideImage {
-                    id: embed.clone(),
-                    mime: mime_of(&media_path),
+                    id: rel.id.clone(),
+                    mime: mime_of(media_path),
                     data,
                 });
-                image_index.insert((idx, embed.clone()), i);
+                image_index.insert((idx, rel.id.clone()), i);
             }
         }
     }
@@ -235,27 +236,9 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedPpt, String> {
     })
 }
 
-fn read_zip_text(zip: &mut ZipArchive<Cursor<Vec<u8>>>, name: &str) -> Result<String, String> {
-    let mut s = String::new();
-    zip.by_name(name)
-        .map_err(|e| e.to_string())?
-        .read_to_string(&mut s)
-        .map_err(|e| e.to_string())?;
-    Ok(s)
-}
-
-fn read_zip_bytes(zip: &mut ZipArchive<Cursor<Vec<u8>>>, name: &str) -> Result<Vec<u8>, String> {
-    let mut b = Vec::new();
-    zip.by_name(name)
-        .map_err(|e| e.to_string())?
-        .read_to_end(&mut b)
-        .map_err(|e| e.to_string())?;
-    Ok(b)
-}
-
 /// 读幻灯尺寸(EMU → px)。
 fn read_slide_size(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> Option<(f64, f64)> {
-    let xml = read_zip_text(zip, "ppt/presentation.xml").ok()?;
+    let xml = read_text(zip, "ppt/presentation.xml").ok()?;
     let mut reader = XmlReader::from_str(&xml);
     let mut buf = Vec::new();
     loop {
@@ -279,9 +262,9 @@ fn read_slide_size(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> Option<(f64, f64)> 
 /// 按 `p:sldIdLst` 的顺序解析幻灯路径;失败时回退到按文件名排序。
 fn ordered_slide_paths(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> Vec<String> {
     let ordered = (|| {
-        let pres = read_zip_text(zip, "ppt/presentation.xml").ok()?;
-        let rels = read_zip_text(zip, "ppt/_rels/presentation.xml.rels").ok()?;
-        let rid_to_target = parse_rels(&rels);
+        let pres = read_text(zip, "ppt/presentation.xml").ok()?;
+        let rels = read_text(zip, "ppt/_rels/presentation.xml.rels").ok()?;
+        let rid_to_target = rels_map(&office_ooxml::parse_rels(&rels, "ppt/presentation.xml"));
 
         // 按出现顺序收集 sldId 的 r:id
         let mut reader = XmlReader::from_str(&pres);
@@ -303,7 +286,7 @@ fn ordered_slide_paths(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> Vec<String> {
         let paths: Vec<String> = rids
             .iter()
             .filter_map(|rid| rid_to_target.get(rid))
-            .map(|t| normalize_ppt_path(t))
+            .cloned()
             .collect();
         if paths.is_empty() {
             None
@@ -329,87 +312,6 @@ fn slide_number(name: &str) -> usize {
         .trim_end_matches(".xml")
         .parse()
         .unwrap_or(usize::MAX)
-}
-
-/// `ppt/slides/slide1.xml` → 其 rels 里 embed id → target(相对路径已规整)。
-fn read_slide_rels(
-    zip: &mut ZipArchive<Cursor<Vec<u8>>>,
-    slide_path: &str,
-) -> Vec<(String, String)> {
-    let rels_path = slide_rels_path(slide_path);
-    let Ok(xml) = read_zip_text(zip, &rels_path) else {
-        return Vec::new();
-    };
-    parse_rels(&xml).into_iter().collect()
-}
-
-/// `ppt/slides/slide1.xml` → `ppt/slides/_rels/slide1.xml.rels`。
-fn slide_rels_path(slide_path: &str) -> String {
-    match slide_path.rsplit_once('/') {
-        Some((dir, file)) => format!("{dir}/_rels/{file}.rels"),
-        None => format!("_rels/{slide_path}.rels"),
-    }
-}
-
-/// 解析 .rels:Id → Target。
-fn parse_rels(xml: &str) -> HashMap<String, String> {
-    let mut reader = XmlReader::from_str(xml);
-    let mut buf = Vec::new();
-    let mut map = HashMap::new();
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e)) | Ok(Event::Start(e)) if local(&e) == "Relationship" => {
-                if let (Some(id), Some(target)) = (attr(&e, "Id"), attr(&e, "Target")) {
-                    map.insert(id, target);
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    map
-}
-
-/// presentation.xml.rels 的 target 形如 `slides/slide1.xml` → `ppt/slides/slide1.xml`。
-fn normalize_ppt_path(target: &str) -> String {
-    let t = target.trim_start_matches("/");
-    if t.starts_with("ppt/") {
-        t.to_string()
-    } else {
-        format!("ppt/{t}")
-    }
-}
-
-/// slide rels 的图片 target 形如 `../media/image1.png` → `ppt/media/image1.png`。
-fn normalize_media_path(target: &str) -> String {
-    let t = target.trim_start_matches("/");
-    if let Some(rest) = t.strip_prefix("../") {
-        format!("ppt/{rest}")
-    } else if t.starts_with("ppt/") {
-        t.to_string()
-    } else {
-        format!("ppt/slides/{t}")
-    }
-}
-
-fn mime_of(path: &str) -> String {
-    let l = path.to_ascii_lowercase();
-    if l.ends_with(".png") {
-        "image/png"
-    } else if l.ends_with(".jpg") || l.ends_with(".jpeg") {
-        "image/jpeg"
-    } else if l.ends_with(".gif") {
-        "image/gif"
-    } else if l.ends_with(".bmp") {
-        "image/bmp"
-    } else if l.ends_with(".svg") {
-        "image/svg+xml"
-    } else {
-        "application/octet-stream"
-    }
-    .to_string()
 }
 
 // ---------- 幻灯 spTree 解析 ----------
@@ -917,7 +819,7 @@ fn graphic_kind(uri: &str) -> Option<String> {
 /// 每个 scheme 子元素(dk1/lt1/dk2/lt2/accent1..6/hlink/folHlink)含 `srgbClr@val` 或 `sysClr@lastClr`。
 fn load_theme(zip: &mut ZipArchive<Cursor<Vec<u8>>>) -> Theme {
     let mut theme = Theme::new();
-    let xml = match read_zip_text(zip, "ppt/theme/theme1.xml") {
+    let xml = match read_text(zip, "ppt/theme/theme1.xml") {
         Ok(x) => x,
         Err(_) => return theme,
     };
@@ -987,33 +889,33 @@ fn resolve_scheme_color(theme: &Theme, val: &str) -> Option<String> {
 /// 从 slide rels 找到版式与母版,提取占位符几何(`type|idx` → 像素矩形)。母版打底、版式覆盖。
 fn layout_master_geom(
     zip: &mut ZipArchive<Cursor<Vec<u8>>>,
-    slide_rels: &[(String, String)],
+    slide_rels: &[Rel],
 ) -> (PhGeom, TextDefaults) {
     let mut geom = PhGeom::new();
     let mut defaults = TextDefaults::default();
     // slide → 版式
     let layout_path = slide_rels
         .iter()
-        .find(|(_, t)| t.contains("slideLayout"))
-        .map(|(_, t)| normalize_ppt_path(&t.replace("../", "")));
+        .find(|r| r.is_kind("slideLayout"))
+        .map(|r| r.target.clone());
     let Some(layout_path) = layout_path else {
         return (geom, defaults);
     };
     // 版式 → 母版
-    let layout_rels = read_rels_for(zip, &layout_path);
+    let layout_rels = rels_for(zip, &layout_path);
     if let Some(master) = layout_rels
         .iter()
-        .find(|(_, t)| t.contains("slideMaster"))
-        .map(|(_, t)| normalize_ppt_path(&t.replace("../", "")))
+        .find(|r| r.is_kind("slideMaster"))
+        .map(|r| r.target.clone())
     {
-        if let Ok(xml) = read_zip_text(zip, &master) {
+        if let Ok(xml) = read_text(zip, &master) {
             for (k, v) in collect_placeholder_geom(&xml) {
                 geom.insert(k, v); // 母版打底
             }
             defaults = collect_text_defaults(&xml); // 文本默认样式来自母版 txStyles
         }
     }
-    if let Ok(xml) = read_zip_text(zip, &layout_path) {
+    if let Ok(xml) = read_text(zip, &layout_path) {
         for (k, v) in collect_placeholder_geom(&xml) {
             geom.insert(k, v); // 版式覆盖母版
         }
@@ -1084,18 +986,6 @@ fn collect_text_defaults(xml: &str) -> TextDefaults {
         buf.clear();
     }
     out
-}
-
-/// 读取任意部件的 `_rels/<file>.rels`。
-fn read_rels_for(zip: &mut ZipArchive<Cursor<Vec<u8>>>, part_path: &str) -> Vec<(String, String)> {
-    let rels_path = match part_path.rsplit_once('/') {
-        Some((dir, file)) => format!("{dir}/_rels/{file}.rels"),
-        None => format!("_rels/{part_path}.rels"),
-    };
-    match read_zip_text(zip, &rels_path) {
-        Ok(xml) => parse_rels(&xml).into_iter().collect(),
-        Err(_) => Vec::new(),
-    }
 }
 
 /// 从版式/母版 XML 提取占位符几何:遍历 sp,记 ph 键与 xfrm,有 xfrm 者入表。
@@ -1391,36 +1281,6 @@ fn handle_end(
     }
 }
 
-/// 元素本地名(去命名空间前缀)。
-fn local(e: &BytesStart) -> String {
-    local_from(e.name().as_ref())
-}
-
-/// 结束标签的本地名。
-fn local_end(e: &quick_xml::events::BytesEnd) -> String {
-    local_from(e.name().as_ref())
-}
-
-fn local_from(bytes: &[u8]) -> String {
-    let name = std::str::from_utf8(bytes).unwrap_or("");
-    name.rsplit(':').next().unwrap_or(name).to_string()
-}
-
-/// 取属性(按本地名匹配,忽略命名空间前缀)。
-fn attr(e: &BytesStart, key: &str) -> Option<String> {
-    e.attributes().flatten().find_map(|a| {
-        let k = a.key;
-        let kb = k.as_ref();
-        let kname = std::str::from_utf8(kb).ok()?;
-        let klocal = kname.rsplit(':').next().unwrap_or(kname);
-        if klocal == key {
-            Some(String::from_utf8_lossy(&a.value).to_string())
-        } else {
-            None
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1532,6 +1392,46 @@ mod tests {
         ]);
         let parsed = parse(&pptx).expect("解析");
         assert_eq!(parsed.images.len(), 1);
+        assert_eq!(parsed.images[0].mime, "image/png");
+        assert_eq!(parsed.image_index.get(&(0, "rId2".to_string())), Some(&0));
+    }
+
+    /// 幻灯 rels 里的**非图片**关系不得被当成图片收集。
+    ///
+    /// 一张幻灯的 rels 必然含 slideLayout,往往还有 notesSlide / chart。
+    /// 早先这里不按 Type 过滤,把这些 XML part 也读成了「图片」——
+    /// 一个 40 页的 deck 会因此多出几十个无用的 object URL。
+    #[test]
+    fn only_image_rels_become_images() {
+        let pres = br#"<p:presentation xmlns:p="p" xmlns:r="r">
+          <p:sldSz cx="9144000" cy="6858000"/>
+          <p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst>
+        </p:presentation>"#;
+        let pres_rels = br#"<Relationships xmlns="x"><Relationship Id="rId1" Type="t" Target="slides/slide1.xml"/></Relationships>"#;
+        // 三条关系:一张图 + 一个版式 + 一个备注页;后两者的 part 真实存在
+        let slide_rels = br#"<Relationships xmlns="x">
+          <Relationship Id="rId2" Type="image" Target="../media/image1.png"/>
+          <Relationship Id="rId9" Type="slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+          <Relationship Id="rId8" Type="notesSlide" Target="../notesSlides/notesSlide1.xml"/>
+        </Relationships>"#;
+        let png: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 1, 2, 3];
+        let pptx = zip_of(&[
+            ("ppt/presentation.xml", pres),
+            ("ppt/_rels/presentation.xml.rels", pres_rels),
+            ("ppt/slides/slide1.xml", SLIDE),
+            ("ppt/slides/_rels/slide1.xml.rels", slide_rels),
+            ("ppt/media/image1.png", png),
+            (
+                "ppt/slideLayouts/slideLayout1.xml",
+                br#"<p:sldLayout xmlns:p="p"/>"#,
+            ),
+            (
+                "ppt/notesSlides/notesSlide1.xml",
+                br#"<p:notes xmlns:p="p"/>"#,
+            ),
+        ]);
+        let parsed = parse(&pptx).expect("解析");
+        assert_eq!(parsed.images.len(), 1, "只有 Type=image 的关系算图片");
         assert_eq!(parsed.images[0].mime, "image/png");
         assert_eq!(parsed.image_index.get(&(0, "rId2".to_string())), Some(&0));
     }

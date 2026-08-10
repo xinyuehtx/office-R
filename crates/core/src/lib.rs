@@ -20,7 +20,9 @@
 //! 公式求值、数字/日期格式化、图表都是 `Sheet` 之上的独立叠层,
 //! 而不是把这些概念混进表格模型。详见 `docs/architecture.md`。
 
-pub mod chart;
+/// 图表数据解析已移到 `office-ooxml`(xlsx 与 pptx 共用);这里转发以免调用点大改。
+pub use office_ooxml::chart;
+
 pub mod csv;
 pub mod docx;
 pub mod filter;

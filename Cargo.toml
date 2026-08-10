@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/wasm", "crates/xtask"]
+members = ["crates/core", "crates/ooxml", "crates/wasm", "crates/xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ repository = "https://github.com/xinyuehtx/office-R"
 
 [workspace.dependencies]
 office-core = { path = "crates/core" }
+office-ooxml = { path = "crates/ooxml" }
 serde = { version = "1", features = ["derive"] }
 
 [profile.release]

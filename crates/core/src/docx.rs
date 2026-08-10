@@ -13,6 +13,7 @@
 //! 左缩进 / 段前段后间距 / 行距倍数、批注(文末「作者:内容」汇总)。
 //! **非目标**:文本框绘图、公式对象(OMML)、域/目录(TOC 的结果文本已随普通 run 渲染)。
 
+use office_ooxml::{emu_to_px, mime_of};
 use serde::Serialize;
 
 use docx_rs::{
@@ -188,11 +189,6 @@ pub struct DocImage {
 pub struct ParsedDoc {
     pub doc: WordDoc,
     pub images: Vec<DocImage>,
-}
-
-/// EMU → 像素(96 DPI):914400 EMU = 1 英寸 = 96px,即 ÷9525。
-fn emu_to_px(emu: u32) -> f64 {
-    emu as f64 / 9525.0
 }
 
 /// 解析上下文:携带编号定义与运行期序号计数。
@@ -449,24 +445,6 @@ fn collect_images(docx: &Docx) -> Vec<DocImage> {
     out
 }
 
-fn mime_of(path: &str) -> String {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".png") {
-        "image/png"
-    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        "image/jpeg"
-    } else if lower.ends_with(".gif") {
-        "image/gif"
-    } else if lower.ends_with(".bmp") {
-        "image/bmp"
-    } else if lower.ends_with(".svg") {
-        "image/svg+xml"
-    } else {
-        "application/octet-stream"
-    }
-    .to_string()
-}
-
 fn convert_child(child: &DocumentChild, ctx: &mut Ctx) -> Option<Block> {
     match child {
         DocumentChild::Paragraph(p) => Some(Block::Paragraph(convert_paragraph(p, ctx))),
@@ -688,8 +666,8 @@ fn drawing_image(d: &docx_rs::Drawing) -> Option<ImageRef> {
             let (w, h) = pic.size;
             Some(ImageRef {
                 id: pic.id.clone(),
-                width_px: emu_to_px(w),
-                height_px: emu_to_px(h),
+                width_px: emu_to_px(f64::from(w)),
+                height_px: emu_to_px(f64::from(h)),
             })
         }
         _ => None,

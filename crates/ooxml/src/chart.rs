@@ -7,6 +7,8 @@ use quick_xml::events::Event;
 use quick_xml::Reader as XmlReader;
 use serde::Serialize;
 
+use crate::local_name;
+
 /// 一个图表的可渲染数据。
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct ChartData {
@@ -18,11 +20,6 @@ pub struct ChartData {
     pub categories: Vec<String>,
     /// 标题(如有)。
     pub title: Option<String>,
-}
-
-/// 元素本地名(去命名空间前缀)。
-fn local_name(raw: &[u8]) -> &[u8] {
-    raw.rsplit(|&b| b == b':').next().unwrap_or(raw)
 }
 
 /// 解析 `chartN.xml`:图表类型 + 各系列 `numCache` 数值 + 首个类别 `strCache` + 标题。

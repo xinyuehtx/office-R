@@ -26,7 +26,8 @@
 use std::io::{Cursor, Read};
 
 use calamine::{open_workbook_from_rs, Data, DataType, Reader, Xlsx};
-use quick_xml::events::{BytesStart, Event};
+use office_ooxml::{attr, emu_to_px as emu, local, mime_of, resolve_rel_path};
+use quick_xml::events::Event;
 use quick_xml::Reader as XmlReader;
 use zip::ZipArchive;
 
@@ -416,24 +417,6 @@ fn all_rel_targets(xml: &str, base_dir: &str) -> std::collections::HashMap<Strin
     out
 }
 
-/// 相对 rels target(可能含 `../`)按 `base_dir` 归一到 zip 内绝对路径。
-fn resolve_rel_path(base_dir: &str, target: &str) -> String {
-    if let Some(abs) = target.strip_prefix('/') {
-        return abs.to_string();
-    }
-    let mut parts: Vec<&str> = base_dir.split('/').collect();
-    for seg in target.split('/') {
-        match seg {
-            "." | "" => {}
-            ".." => {
-                parts.pop();
-            }
-            s => parts.push(s),
-        }
-    }
-    parts.join("/")
-}
-
 /// 解析 drawingN.xml:返回 `(embed, (from_row,from_col), to?, ext_px?)` 列表。
 #[allow(clippy::type_complexity)]
 type DrawImage = (String, (u32, u32), Option<(u32, u32)>, Option<(f64, f64)>);
@@ -550,30 +533,6 @@ fn parse_drawing(xml: &str) -> (Vec<DrawImage>, Vec<DrawChart>) {
     (out, charts)
 }
 
-/// 由扩展名推断图片 MIME。
-fn mime_of(path: &str) -> String {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".png") {
-        "image/png"
-    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
-        "image/jpeg"
-    } else if lower.ends_with(".gif") {
-        "image/gif"
-    } else if lower.ends_with(".bmp") {
-        "image/bmp"
-    } else if lower.ends_with(".svg") {
-        "image/svg+xml"
-    } else {
-        "application/octet-stream"
-    }
-    .to_string()
-}
-
-/// EMU → 像素(96 DPI):÷9525。
-fn emu(v: f64) -> f64 {
-    v / 9525.0
-}
-
 /// 从 calamine 的值区域(+ 可选公式区域 + 每格样式)构建显示表与公式清单。
 ///
 /// 用**绝对坐标**(从 (0,0) 到 `end`)建表,使网格 `(r,c)` 与 Excel A1 地址对齐。
@@ -664,36 +623,9 @@ fn cell_text(data: &Data) -> String {
 
 // ---- 自解析:样式(numfmt 码)+ 工作表路径映射 + 每格样式索引/合并区 ----
 
-/// 读 zip 内某文本文件(缺失/错误返回 None)。
-fn zip_text(zip: &mut ZipArchive<Cursor<Vec<u8>>>, name: &str) -> Option<String> {
-    let mut s = String::new();
-    zip.by_name(name).ok()?.read_to_string(&mut s).ok()?;
-    Some(s)
-}
-
-/// 元素本地名(去命名空间前缀)。
-fn local(e: &BytesStart) -> String {
-    let full = e.name();
-    let bytes = full.as_ref();
-    let name = bytes.rsplit(|&b| b == b':').next().unwrap_or(bytes);
-    String::from_utf8_lossy(name).into_owned()
-}
-
-/// 取属性值。
-fn attr(e: &BytesStart, key: &str) -> Option<String> {
-    e.attributes().flatten().find_map(|a| {
-        let k = a.key;
-        let kn = k
-            .as_ref()
-            .rsplit(|&b| b == b':')
-            .next()
-            .unwrap_or(k.as_ref());
-        if kn == key.as_bytes() {
-            Some(String::from_utf8_lossy(&a.value).into_owned())
-        } else {
-            None
-        }
-    })
+/// 读 zip 内某文本 part(缺失/错误返回 None)。转发到 [`office_ooxml::read_text`]。
+fn zip_text(zip: &mut office_ooxml::Package, name: &str) -> Option<String> {
+    office_ooxml::read_text(zip, name).ok()
 }
 
 /// 样式表:每个 cellXfs 索引 → (numfmt 格式码, 视觉样式)。

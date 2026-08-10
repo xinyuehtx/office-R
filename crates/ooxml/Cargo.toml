@@ -1,0 +1,12 @@
+[package]
+name = "office-ooxml"
+description = "OOXML/OPC 容器级共享原语:图表数据解析、XML 元素名/属性、rels 路径归一、zip 读取"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+quick-xml = "0.41.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+serde = { workspace = true }
