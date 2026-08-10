@@ -92,13 +92,15 @@ ppt 查 `ppt/presentation.xml`,excel 查 `xl/workbook.xml` 或走 core 的 CSV �
 
 | 产物 | 尺寸 |
 | --- | --- |
-| (拆分前)`office_wasm_bg.wasm` | **1,257,803 字节**(1.20 MiB) |
-| `office_word_wasm_bg.wasm` | _待填_ |
-| `office_excel_wasm_bg.wasm` | _待填_ |
-| `office_ppt_wasm_bg.wasm` | _待填_ |
+| (拆分前)`office_wasm_bg.wasm` | 1,257,803 字节(1.20 MiB) |
+| `office_word_wasm_bg.wasm` | **718,305 字节**(0.68 MiB) |
+| `office_excel_wasm_bg.wasm` | **865,129 字节**(0.83 MiB) |
+| `office_ppt_wasm_bg.wasm` | **260,294 字节**(0.25 MiB) |
 
-判读标准:三份**各自**都应显著小于 1.20 MiB(否则说明依赖没真隔离);三份**之和**大于
-1.20 MiB 是预期的。
+判读:三份**各自**都显著小于 1.20 MiB —— 依赖真隔离了(ppt 只有 0.25 MiB,
+因为它连 office-core 都不依赖)。三份之和 1.76 MiB > 1.20 MiB 是预期的固有代价
+(各带一套 wasm-bindgen glue + panic hook + allocator);但演示站按页懒加载,
+打开任一页只 fetch 那一份,**首屏字节反而低于拆分前**。
 
 ## 实施阶段
 

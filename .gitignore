@@ -4,7 +4,7 @@
 *.pdb
 
 # ---------- WASM 构建产物(由 wasm-pack 生成,不入库) ----------
-/web/src/wasm/pkg/
+/packages/*/pkg/
 
 # ---------- Node / pnpm ----------
 node_modules/

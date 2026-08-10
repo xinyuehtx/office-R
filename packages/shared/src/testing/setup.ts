@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { setLogLevel } from "../apps/shared/logger";
+import { setLogLevel } from "../logger";
 
 // 测试里默认关掉日志:断言看的是行为,不是控制台输出。
 // 需要验证日志本身的用例(logger.test.ts)会自己临时打开级别。

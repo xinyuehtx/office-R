@@ -4,7 +4,7 @@
  * CSV 与 xlsx 共用这一层 —— 两者的差异只在如何得到 `WasmSheet`,
  * 取窗口 / 过滤 / 排序 / 查找 / 公式回显的行为完全一致。
  */
-import { parseCsvPacked, WasmSheet } from "./pkg/office_wasm.js";
+import { parseCsvPacked, WasmSheet } from "../../pkg/office_excel_wasm.js";
 import { ensureReady } from "./init";
 import type {
   CellFormula,
@@ -13,7 +13,7 @@ import type {
   SheetHandle,
   SheetMeta,
   UniqueValues,
-} from "../apps/shared/sheet";
+} from "../sheet";
 
 /**
  * 表格的紧凑传输表示。

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { WordPage } from "./apps/word/WordPage";
 import { ExcelPage } from "./apps/excel/ExcelPage";
 import { PptPage } from "./apps/ppt/PptPage";
+import "@tengxiaohyx/office-shared/page.css";
 import "./App.css";
 
 type TabKey = "word" | "excel" | "ppt";

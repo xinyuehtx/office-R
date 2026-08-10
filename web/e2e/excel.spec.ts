@@ -2,6 +2,15 @@ import { test, expect } from "@playwright/test";
 import { gotoTab, upload } from "./helpers";
 
 test.describe("Excel 只读:公式 / 过滤 / 冻结", () => {
+  test("CSV 解析在 Web Worker 里跑(离主线程)", async ({ page }) => {
+    // 守 csvWorker 的 new URL(..., import.meta.url):它从 @tengxiaohyx/office-excel
+    // 包内解析 worker,单测抓不到(jsdom 无 Worker 会静默走主线程 fallback)。
+    await gotoTab(page, "表格");
+    const worker = page.waitForEvent("worker");
+    await upload(page, "sample.csv");
+    expect((await worker).url()).toContain("csvWorker");
+  });
+
   test("公式求值:D2 = B2*C2 = 14", async ({ page }) => {
     await gotoTab(page, "表格");
     await upload(page, "sample.csv");

@@ -1,11 +1,25 @@
-/** pptx → 演示模型 + 图片 URL。 */
-import { WasmPresentation } from "./pkg/office_wasm.js";
-import { ensureReady, revokeAll } from "./init";
-import { imageKey, type PptDocument, type Presentation } from "../apps/ppt/model";
+/** PPT wasm 后端的加载与封装。 */
+import init, { WasmPresentation, setLogLevel } from "../pkg/office_ppt_wasm.js";
+import { getLogLevel, onLogLevelChange } from "@tengxiaohyx/office-shared";
+import { imageKey, type PptDocument, type Presentation } from "./model";
 
-/**
- * 解析 pptx 字节为演示模型 + 图片 URL(按 幻灯序号|embed 键)。
- */
+let ready: Promise<unknown> | null = null;
+
+async function ensureReady(): Promise<void> {
+  if (!ready) {
+    ready = init().then(() => {
+      setLogLevel(getLogLevel());
+      onLogLevelChange((level) => setLogLevel(level));
+    });
+  }
+  await ready;
+}
+
+function revokeAll(urls: Iterable<string>): void {
+  for (const url of urls) URL.revokeObjectURL(url);
+}
+
+/** 解析 pptx 字节为演示模型 + 图片 URL(按 幻灯序号|embed 键)。 */
 export async function loadPptx(bytes: Uint8Array): Promise<PptDocument> {
   await ensureReady();
   const handle = WasmPresentation.parse(bytes);

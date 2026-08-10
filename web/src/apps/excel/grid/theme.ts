@@ -84,4 +84,4 @@ export const COLORS = {
 } as const;
 
 /** 字体族 —— 定义在 `shared/fonts`(它是文本度量的关注点,不是网格主题),这里转发。 */
-export { FONT_FAMILY } from "../../shared/fonts";
+export { FONT_FAMILY } from "@tengxiaohyx/office-shared";

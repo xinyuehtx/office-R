@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FileUpload } from "../shared/FileUpload";
-import { sharedMeasurer } from "../shared/textMeasure";
-import { loadDocx } from "../../wasm";
-import type { WordDocument } from "./model";
+import { FileUpload } from "@tengxiaohyx/office-shared";
+import { sharedMeasurer } from "@tengxiaohyx/office-shared";
+import { loadDocx } from "@tengxiaohyx/office-word";
+import type { WordDocument } from "@tengxiaohyx/office-word";
 import {
   layoutDoc,
   imageIdsIn,

@@ -9,9 +9,9 @@
  * 项目符号/编号列表(缩进 + 前缀)、内联图片(等比缩放)、表格(等宽列 + 边框)、图文混排。
  */
 
-import type { TextMeasurer } from "../shared/textMeasure";
-import { FONT_FAMILY } from "../shared/fonts";
-import type { Block, Paragraph, Run, WordModel } from "./model";
+import type { TextMeasurer } from "@tengxiaohyx/office-shared";
+import { FONT_FAMILY } from "@tengxiaohyx/office-shared";
+import type { Block, Paragraph, Run, WordModel } from "@tengxiaohyx/office-word";
 
 /** 页面内边距与默认排版常量(CSS 像素)。 */
 export const PAGE_PADDING = 48;

@@ -6,7 +6,10 @@ members = [
     "crates/word",
     "crates/excel",
     "crates/ppt",
-    "crates/wasm",
+    "crates/wasm-log",
+    "crates/word-wasm",
+    "crates/excel-wasm",
+    "crates/ppt-wasm",
     "crates/xtask",
 ]
 
@@ -22,6 +25,7 @@ office-ooxml = { path = "crates/ooxml" }
 office-word = { path = "crates/word" }
 office-excel = { path = "crates/excel" }
 office-ppt = { path = "crates/ppt" }
+office-wasm-log = { path = "crates/wasm-log" }
 serde = { version = "1", features = ["derive"] }
 
 [profile.release]

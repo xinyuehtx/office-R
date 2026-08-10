@@ -1,0 +1,20 @@
+{
+  "name": "@tengxiaohyx/office-ppt",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "PowerPoint (.pptx) 只读查看:幻灯模型 + canvas 渲染 + 独立 wasm 后端",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "dependencies": {
+    "@tengxiaohyx/office-shared": "workspace:*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

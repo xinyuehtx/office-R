@@ -385,6 +385,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "office-excel-wasm"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "js-sys",
+ "office-core",
+ "office-excel",
+ "office-wasm-log",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "office-ooxml"
 version = "0.1.0"
 dependencies = [
@@ -404,18 +419,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "office-wasm"
+name = "office-ppt-wasm"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
- "js-sys",
- "office-core",
- "office-excel",
  "office-ppt",
- "office-word",
- "serde",
+ "office-wasm-log",
  "serde-wasm-bindgen",
- "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "office-wasm-log"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
  "wasm-bindgen",
 ]
 
@@ -427,6 +445,17 @@ dependencies = [
  "office-ooxml",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "office-word-wasm"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "office-wasm-log",
+ "office-word",
+ "serde-wasm-bindgen",
+ "wasm-bindgen",
 ]
 
 [[package]]

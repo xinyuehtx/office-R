@@ -1,0 +1,20 @@
+{
+  "name": "@tengxiaohyx/office-excel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Excel (.xlsx) 与 CSV 表格查看:canvas 网格 + 过滤/排序/冻结/查找 + 独立 wasm 后端",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "dependencies": {
+    "@tengxiaohyx/office-shared": "workspace:*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

@@ -14,7 +14,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "jsdom",
-    setupFiles: ["./src/test/setup.ts"],
+    setupFiles: ["@tengxiaohyx/office-shared/testing/setup"],
     // e2e/*.spec.ts 是 Playwright 测试,不能被 vitest 跑
     exclude: [...configDefaults.exclude, "e2e/**"],
   },

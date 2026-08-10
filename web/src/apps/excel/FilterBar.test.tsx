@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, it, expect, vi } from "vitest";
 import { FilterBar } from "./FilterBar";
-import type { FilterSpec, SheetHandle } from "../shared/sheet";
+import type { FilterSpec, SheetHandle } from "@tengxiaohyx/office-excel";
 
 /** 最小 SheetHandle 桩:只实现 FilterBar 用到的部分。 */
 function stubSheet(overrides: Partial<SheetHandle> = {}): SheetHandle {

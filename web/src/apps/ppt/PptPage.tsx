@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FileUpload } from "../shared/FileUpload";
-import { loadPptx } from "../../wasm";
-import type { PptDocument } from "./model";
-import { imageKey } from "./model";
+import { FileUpload } from "@tengxiaohyx/office-shared";
+import { loadPptx } from "@tengxiaohyx/office-ppt";
+import type { PptDocument } from "@tengxiaohyx/office-ppt";
+import { imageKey } from "@tengxiaohyx/office-ppt";
 import { drawSlide, fitScale, applyTransition, TRANSITION_MS } from "./slideRender";
 
 type Status = "idle" | "loading" | "ready" | "error";

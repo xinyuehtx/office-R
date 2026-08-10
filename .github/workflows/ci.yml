@@ -15,14 +15,17 @@ permissions:
   contents: read
 
 jobs:
-  # WASM 产物**只构建一次**,由 web / e2e 两个 job 下载复用。
+  # 三份 WASM 产物**并行**构建,各自上传 artifact 供 web / e2e 下载复用。
   #
   # release profile 是 opt-level="z" + lto + codegen-units=1(最慢的一档),
-  # 早先三个 job 各编一次同一份产物,且 rust-cache 的 key 含 job 名、互不命中。
+  # 三个 leg 并行避免串行 link 撞穿 timeout;每份产物只构建一次。
   wasm:
-    name: WASM 构建(产物供 web / e2e 复用)
+    name: WASM 构建(${{ matrix.app }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      matrix:
+        app: [word, excel, ppt]
     steps:
       - uses: actions/checkout@v7
 
@@ -38,13 +41,16 @@ jobs:
         run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
 
       - name: 构建 WASM
-        run: wasm-pack build crates/wasm --target web --out-dir ../../web/src/wasm/pkg --out-name office_wasm
+        run: wasm-pack build crates/${{ matrix.app }}-wasm --target web --out-dir ../../packages/${{ matrix.app }}/pkg --out-name office_${{ matrix.app }}_wasm
+
+      - name: 产物尺寸
+        run: ls -l packages/${{ matrix.app }}/pkg/*.wasm
 
       - name: 上传 WASM 产物
         uses: actions/upload-artifact@v4
         with:
-          name: wasm-pkg
-          path: web/src/wasm/pkg
+          name: wasm-${{ matrix.app }}
+          path: packages/${{ matrix.app }}/pkg
           if-no-files-found: error
           retention-days: 1
 
@@ -78,18 +84,23 @@ jobs:
         run: cargo run -p xtask --locked -- fixtures --check web/e2e/fixtures
 
   web:
-    name: Web 视图层(typecheck / test / build)
+    name: Web 视图层(typecheck / lint / test / build)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: wasm
     steps:
       - uses: actions/checkout@v7
 
-      - name: 下载 WASM 产物
+      # 三份 wasm 产物各落回对应包的 pkg/(typecheck 需要它们的 .d.ts)
+      - name: 下载 word WASM
         uses: actions/download-artifact@v4
-        with:
-          name: wasm-pkg
-          path: web/src/wasm/pkg
+        with: { name: wasm-word, path: packages/word/pkg }
+      - name: 下载 excel WASM
+        uses: actions/download-artifact@v4
+        with: { name: wasm-excel, path: packages/excel/pkg }
+      - name: 下载 ppt WASM
+        uses: actions/download-artifact@v4
+        with: { name: wasm-ppt, path: packages/ppt/pkg }
 
       - name: 安装 pnpm
         uses: pnpm/action-setup@v6
@@ -106,16 +117,16 @@ jobs:
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
 
-      - name: 类型检查
-        run: pnpm -C web typecheck
+      - name: 类型检查(全部包)
+        run: pnpm typecheck
 
-      - name: Lint
-        run: pnpm -C web lint
+      - name: Lint(全仓)
+        run: pnpm lint
 
-      - name: 单元测试
-        run: pnpm -C web test
+      - name: 单元测试(工作区)
+        run: pnpm test
 
-      - name: 构建
+      - name: 构建演示站
         run: pnpm -C web build
 
   e2e:
@@ -126,11 +137,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: 下载 WASM 产物
+      - name: 下载 word WASM
         uses: actions/download-artifact@v4
-        with:
-          name: wasm-pkg
-          path: web/src/wasm/pkg
+        with: { name: wasm-word, path: packages/word/pkg }
+      - name: 下载 excel WASM
+        uses: actions/download-artifact@v4
+        with: { name: wasm-excel, path: packages/excel/pkg }
+      - name: 下载 ppt WASM
+        uses: actions/download-artifact@v4
+        with: { name: wasm-ppt, path: packages/ppt/pkg }
 
       # 夹具已入库,漂移由 rust job 校验 —— 此 job 完全不需要 Rust 工具链。
       - name: 安装 pnpm

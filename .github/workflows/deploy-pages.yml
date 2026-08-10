@@ -33,8 +33,12 @@ jobs:
       - name: 安装 wasm-pack
         run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
 
-      - name: 构建 WASM
-        run: wasm-pack build crates/wasm --target web --out-dir ../../web/src/wasm/pkg --out-name office_wasm
+      - name: 构建三份 WASM(每应用一份,落到各自包的 pkg/)
+        run: |
+          for app in word excel ppt; do
+            wasm-pack build crates/$app-wasm --target web \
+              --out-dir ../../packages/$app/pkg --out-name office_${app}_wasm
+          done
 
       - name: 安装 pnpm
         uses: pnpm/action-setup@v6

@@ -7,9 +7,9 @@
  * 结果以可转移的 `ArrayBuffer` 交回主线程,主线程只负责装配与绘制。
  */
 
-import init, { parseCsvPacked, setLogLevel } from "./pkg/office_wasm.js";
-import type { LogLevel } from "../apps/shared/logger";
-import type { CellFormula, SheetMeta } from "../apps/shared/sheet";
+import init, { parseCsvPacked, setLogLevel } from "../../pkg/office_excel_wasm.js";
+import type { LogLevel } from "@tengxiaohyx/office-shared";
+import type { CellFormula, SheetMeta } from "../sheet";
 
 /** 主线程 → Worker 的请求。 */
 export interface CsvWorkerRequest {

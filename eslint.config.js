@@ -16,11 +16,12 @@ import tseslint from "typescript-eslint";
 export default tseslint.config(
   {
     ignores: [
-      "dist/**",
-      "src/wasm/pkg/**", // wasm-pack 生成物
-      "playwright-report/**",
-      "test-results/**",
-      "coverage/**",
+      "**/dist/**",
+      "**/pkg/**", // wasm-pack 生成物(web/src/wasm/pkg 与 packages/*/pkg)
+      "**/playwright-report/**",
+      "**/test-results/**",
+      "**/coverage/**",
+      "crates/**",
     ],
   },
   js.configs.recommended,

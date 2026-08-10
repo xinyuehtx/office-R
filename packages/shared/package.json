@@ -1,0 +1,19 @@
+{
+  "name": "@tengxiaohyx/office-shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "office-R 三应用共用的前端叶子:日志 / 文本测量 / 图表绘制 / 上传控件 / 字体",
+  "exports": {
+    ".": "./src/index.ts",
+    "./page.css": "./src/page.css",
+    "./testing/setup": "./src/testing/setup.ts"
+  },
+  "peerDependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

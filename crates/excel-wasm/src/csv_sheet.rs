@@ -27,7 +27,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::xlsx_dto::{ChartDto, ImageDto, SparklineDto, StyleDto};
 
-use crate::log::{self, Level};
+use office_wasm_log::{self as log, Level};
 
 /// 解析产出的紧凑缓冲,准备跨线程转移。
 ///

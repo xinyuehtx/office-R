@@ -7,9 +7,9 @@
  *   功能仍然可用,只是解析期间会卡一下 —— 可用性优先于性能。
  */
 
-import { getLogLevel, type Tracer } from "../apps/shared/logger";
-import type { SheetHandle } from "../apps/shared/sheet";
-import { nowSerial, parseCsv, sheetFromPacked, type PackedSheetTransfer } from "./index";
+import { getLogLevel, type Tracer } from "@tengxiaohyx/office-shared";
+import type { SheetHandle } from "../sheet";
+import { nowSerial, parseCsv, sheetFromPacked, type PackedSheetTransfer } from "./sheet";
 import type { CsvWorkerRequest, CsvWorkerResponse } from "./csvWorker";
 
 /** 解析结果与耗时明细。 */

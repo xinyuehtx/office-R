@@ -6,9 +6,9 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createTracer, type Tracer } from "./logger";
-import type { SheetHandle, SheetMeta } from "./sheet";
-import { createWorker, parseCsvFile } from "../../wasm/csvClient";
+import { createTracer, type Tracer } from "@tengxiaohyx/office-shared";
+import type { SheetHandle, SheetMeta } from "@tengxiaohyx/office-excel";
+import { createWorker, parseCsvFile } from "@tengxiaohyx/office-excel";
 
 /** 加载状态。 */
 export type CsvStatus = "idle" | "reading" | "parsing" | "ready" | "error";

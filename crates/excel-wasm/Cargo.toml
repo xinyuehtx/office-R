@@ -1,6 +1,6 @@
 [package]
-name = "office-wasm"
-description = "office-core 的 wasm-bindgen 绑定层,供 Web 视图层调用"
+name = "office-excel-wasm"
+description = "Excel (.xlsx) 与 CSV 的 wasm-bindgen 绑定(独立 cdylib)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,9 +11,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 office-core = { workspace = true }
-office-word = { workspace = true }
 office-excel = { workspace = true }
-office-ppt = { workspace = true }
+office-wasm-log = { workspace = true }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 serde = { workspace = true }
@@ -21,6 +20,4 @@ serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"
 
 [dev-dependencies]
-# DTO 的 JS 线格式(字段名/可选字段省略规则)靠 serde_json 做断言 ——
-# 前端契约拼错一个字母,编译器不会报错,只有这层测试能挡住。
 serde_json = "1.0"

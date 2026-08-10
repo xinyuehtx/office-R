@@ -1,5 +1,5 @@
 /** xlsx → 多工作表工作簿句柄(样式 / 合并区 / 图片 / 图表 / 列宽 / 冻结 / 迷你图)。 */
-import { WasmWorkbook } from "./pkg/office_wasm.js";
+import { WasmWorkbook } from "../../pkg/office_excel_wasm.js";
 import { ensureReady, revokeAll } from "./init";
 import { buildSheetHandle } from "./sheet";
 import type {
@@ -9,7 +9,7 @@ import type {
   SheetHandle,
   SheetImage,
   SheetSparkline,
-} from "../apps/shared/sheet";
+} from "../sheet";
 
 /** 一个已打开的 xlsx 工作簿:工作表名 + 按需取某表的句柄。 */
 export interface XlsxWorkbookHandle {

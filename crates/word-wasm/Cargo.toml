@@ -1,0 +1,17 @@
+[package]
+name = "office-word-wasm"
+description = "Word (.docx) 的 wasm-bindgen 绑定(独立 cdylib)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+office-word = { workspace = true }
+office-wasm-log = { workspace = true }
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1"
