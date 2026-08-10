@@ -1,0 +1,13 @@
+[package]
+name = "office-word"
+description = "Word (.docx) 只读解析 —— 平面化文档模型 + 图片"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+office-ooxml = { workspace = true }
+docx-rs = { version = "0.4.22", default-features = false }
+serde = { workspace = true }
+serde_json = "1.0"

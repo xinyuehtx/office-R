@@ -1,0 +1,14 @@
+[package]
+name = "office-excel"
+description = "Excel (.xlsx) 只读解析 —— 工作表值/公式/样式/合并/图片/图表/迷你图"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+office-core = { workspace = true }
+office-ooxml = { workspace = true }
+calamine = "0.36.1"
+quick-xml = "0.41.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

@@ -31,8 +31,8 @@ use quick_xml::events::Event;
 use quick_xml::Reader as XmlReader;
 use zip::ZipArchive;
 
-use crate::formula::CellFormula;
-use crate::sheet::Sheet;
+use office_core::formula::CellFormula;
+use office_core::sheet::Sheet;
 
 /// 一张工作表:名字 + 值显示表 + 公式清单 + 合并区。
 #[derive(Debug)]
@@ -251,7 +251,7 @@ pub fn parse(bytes: &[u8]) -> Result<XlsxWorkbook, String> {
                 let mut values = Vec::new();
                 'rows: for rr in r0..=r1 {
                     for cc in c0..=c1 {
-                        if values.len() >= crate::limits::MAX_SPARKLINE_VALUES {
+                        if values.len() >= office_core::limits::MAX_SPARKLINE_VALUES {
                             break 'rows;
                         }
                         let v = sheet
@@ -362,7 +362,7 @@ fn read_sheet_drawings(
             continue;
         };
         if let Some(cxml) = zip_text(zip, &chart_path) {
-            if let Some(c) = crate::chart::parse_chart_xml(&cxml) {
+            if let Some(c) = office_ooxml::chart::parse_chart_xml(&cxml) {
                 charts.push(XlsxChart {
                     from_row: from.0,
                     from_col: from.1,
@@ -554,9 +554,9 @@ fn build_sheet(
     // 维度钳制:一个几百字节的 xlsx 只要写一个 <c r="XFD1048576"/> 就能让
     // 这两层循环压进 172 亿个空串。按 Excel 上限 + 总格数预算截断,
     // 与 CSV 的 truncatedRows 同思路 —— 用户通常只想看前面几屏。
-    let end_col = end_col.min(crate::limits::MAX_COL);
-    let mut end_row = end_row.min(crate::limits::MAX_ROW);
-    let max_rows = crate::limits::MAX_SHEET_CELLS / u64::from(end_col + 1);
+    let end_col = end_col.min(office_core::limits::MAX_COL);
+    let mut end_row = end_row.min(office_core::limits::MAX_ROW);
+    let max_rows = office_core::limits::MAX_SHEET_CELLS / u64::from(end_col + 1);
     if u64::from(end_row) + 1 > max_rows {
         end_row = max_rows.saturating_sub(1) as u32;
     }
@@ -573,7 +573,7 @@ fn build_sheet(
                         .and_then(|&s| style_codes.get(s))
                         .and_then(|o| o.clone());
                     match (code, d.as_f64()) {
-                        (Some(code), Some(n)) => crate::numfmt::format_number(n, &code),
+                        (Some(code), Some(n)) => office_core::numfmt::format_number(n, &code),
                         _ => cell_text(d),
                     }
                 }
@@ -614,7 +614,7 @@ fn cell_text(data: &Data) -> String {
             }
         }
         // calamine 的 DateTime Display 只打印裸序列数,这里换算成日期文本。
-        Data::DateTime(dt) => crate::serial::serial_to_string(dt.as_f64()),
+        Data::DateTime(dt) => office_core::serial::serial_to_string(dt.as_f64()),
         Data::DateTimeIso(s) => s.clone(),
         Data::DurationIso(s) => s.clone(),
         Data::Error(e) => format!("#{e:?}"),
@@ -1253,8 +1253,8 @@ fn expand_sqref(sqref: &str) -> Vec<(u32, u32)> {
             // 「全选 + 条件格式」在 Excel 里生成 sqref="A1:XFD1048576" —— 这是真实
             // 文件形态,逐格展开是 172 亿个 (u32, u32) ≈ 137 GB。超限就整块跳过:
             // 与其为了一条覆盖全表的规则耗尽内存,不如放弃这条规则的着色。
-            let area = crate::limits::area(r1 - r0 + 1, c1 - c0 + 1);
-            if area > crate::limits::MAX_CF_CELLS as u64 {
+            let area = office_core::limits::area(r1 - r0 + 1, c1 - c0 + 1);
+            if area > office_core::limits::MAX_CF_CELLS as u64 {
                 continue;
             }
             for r in r0..=r1 {
@@ -1265,7 +1265,7 @@ fn expand_sqref(sqref: &str) -> Vec<(u32, u32)> {
         } else if let Some(rc) = parse_a1(part) {
             out.push(rc);
         }
-        if out.len() >= crate::limits::MAX_CF_CELLS {
+        if out.len() >= office_core::limits::MAX_CF_CELLS {
             break;
         }
     }
@@ -1397,14 +1397,14 @@ fn parse_a1(s: &str) -> Option<(u32, u32)> {
         return None;
     }
     let row: u32 = s[i..].parse().ok()?;
-    if row == 0 || row > crate::limits::MAX_ROW + 1 {
+    if row == 0 || row > office_core::limits::MAX_ROW + 1 {
         return None;
     }
     Some((row - 1, col - 1))
 }
 
 /// 1 基的列号上限(XFD = 16384),供 A1 解析与 `<col>` 收口共用。
-const MAX_COL_1BASED: u32 = crate::limits::MAX_COL + 1;
+const MAX_COL_1BASED: u32 = office_core::limits::MAX_COL + 1;
 
 /// `A1:B2` → (row0, col0, row1, col1)(0 基,归一)。
 fn parse_a1_range(s: &str) -> Option<(u32, u32, u32, u32)> {

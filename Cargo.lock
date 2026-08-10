@@ -366,16 +366,21 @@ dependencies = [
 name = "office-core"
 version = "0.1.0"
 dependencies = [
- "calamine",
  "chardetng",
  "csv",
- "docx-rs",
  "encoding_rs",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "office-excel"
+version = "0.1.0"
+dependencies = [
+ "calamine",
+ "office-core",
  "office-ooxml",
  "quick-xml",
- "serde",
- "serde_json",
- "thiserror",
  "zip",
 ]
 
@@ -389,16 +394,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "office-ppt"
+version = "0.1.0"
+dependencies = [
+ "office-ooxml",
+ "quick-xml",
+ "serde",
+ "zip",
+]
+
+[[package]]
 name = "office-wasm"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
  "office-core",
+ "office-excel",
+ "office-ppt",
+ "office-word",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "office-word"
+version = "0.1.0"
+dependencies = [
+ "docx-rs",
+ "office-ooxml",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

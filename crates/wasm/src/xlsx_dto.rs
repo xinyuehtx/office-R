@@ -9,7 +9,7 @@
 //! 而且字段名拼错只有 e2e 能发现,而 e2e 断言的是画布像素 —— 编译器和测试都挡不住。
 //! 现在字段名由 `serde` 生成,并有 `tests` 里的线格式断言兜底。
 
-use office_core::xlsx::{BorderSide, Borders, CellFmt, XlsxChart, XlsxImage, XlsxSparkline};
+use office_excel::xlsx::{BorderSide, Borders, CellFmt, XlsxChart, XlsxImage, XlsxSparkline};
 use serde::Serialize;
 
 /// 一条边框线。字段名 `w` 与前端 `BorderSide` 契约一致。

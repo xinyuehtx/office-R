@@ -540,13 +540,13 @@ pub fn parse_csv_packed(
 /// xlsx 自带缓存计算值,故不重算;显示表取 calamine 给的值,公式原文单独回传。
 #[wasm_bindgen]
 pub struct WasmWorkbook {
-    sheets: Vec<office_core::xlsx::XlsxSheet>,
-    media: Vec<office_core::xlsx::XlsxMedia>,
+    sheets: Vec<office_excel::xlsx::XlsxSheet>,
+    media: Vec<office_excel::xlsx::XlsxMedia>,
 }
 
 impl WasmWorkbook {
     /// 按下标取工作表,越界给出可读错误。
-    fn sheet_at(&self, i: usize) -> Result<&office_core::xlsx::XlsxSheet, JsValue> {
+    fn sheet_at(&self, i: usize) -> Result<&office_excel::xlsx::XlsxSheet, JsValue> {
         self.sheets
             .get(i)
             .ok_or_else(|| JsValue::from_str("工作表下标越界"))
@@ -562,7 +562,7 @@ fn to_js<T: serde::Serialize>(v: &T) -> Result<JsValue, JsValue> {
 impl WasmWorkbook {
     /// 解析 xlsx 字节为工作簿句柄。
     pub fn parse(bytes: &[u8]) -> Result<WasmWorkbook, JsValue> {
-        let wb = office_core::xlsx::parse(bytes).map_err(|e| JsValue::from_str(&e))?;
+        let wb = office_excel::xlsx::parse(bytes).map_err(|e| JsValue::from_str(&e))?;
         Ok(WasmWorkbook {
             sheets: wb.sheets,
             media: wb.media,

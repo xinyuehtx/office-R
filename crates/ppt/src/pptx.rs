@@ -20,7 +20,7 @@
 //! 组合形状 `p:grpSp`(按 `chOff`/`chExt`→`off`/`ext` 映射子坐标,支持嵌套)、
 //! 渐变填充 `a:gradFill`(取首/末停靠色,视图上→下线性渐变)、
 //! 内嵌表格 `a:tbl`(列宽/行/单元格文本 → 视图绘制真实网格)、
-//! 内嵌图表(`c:chart r:id` → 经 slide rels 找 chartN.xml,复用 `crate::chart` 解析柱/线/饼)。
+//! 内嵌图表(`c:chart r:id` → 经 slide rels 找 chartN.xml,复用 `office_ooxml::chart` 解析柱/线/饼)。
 //! **非目标**:动画的具体效果类型/时长/缓动(只做「点击一步显示一批形状」)、
 //! `withEffect`/`afterEffect` 的自动播放、SmartArt 真实绘制、自定义几何、图片填充、阴影效果、
 //! 表格单元格合并/样式、图表坐标轴/图例。
@@ -101,7 +101,7 @@ pub struct Shape {
     pub table: Option<Table>,
     /// 内嵌图表(柱/线/饼);非图表为 `None`。有图表时视图绘制真实图形。
     #[serde(default)]
-    pub chart: Option<crate::chart::ChartData>,
+    pub chart: Option<office_ooxml::chart::ChartData>,
     /// 图表关系 id(`c:chart r:id`);仅解析中转用,不序列化。
     #[serde(skip)]
     pub chart_rid: Option<String>,
@@ -200,7 +200,7 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedPpt, String> {
             if let Some(rid) = shape.chart_rid.take() {
                 if let Some(chart_path) = by_id.get(&rid) {
                     if let Ok(cxml) = read_text(&mut zip, chart_path) {
-                        shape.chart = crate::chart::parse_chart_xml(&cxml);
+                        shape.chart = office_ooxml::chart::parse_chart_xml(&cxml);
                     }
                 }
             }

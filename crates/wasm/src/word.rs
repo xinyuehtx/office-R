@@ -5,7 +5,7 @@
 //! - 图片字节留在 WASM 线性内存,按 `id` 用 `imageBytes` 取回(避免 base64 膨胀),
 //!   JS 侧用 Blob + object URL 交给 canvas `drawImage`。
 
-use office_core::docx::{self, ParsedDoc};
+use office_word::docx::{self, ParsedDoc};
 use wasm_bindgen::prelude::*;
 
 /// 主线程持有的 Word 文档句柄。

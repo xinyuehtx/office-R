@@ -5,7 +5,7 @@
 //! - 图片字节留在 WASM 内存,按下标取回;每张图带 `(幻灯序号, embed id)` 定位,
 //!   因为不同幻灯的 rels 里 embed id 会重复。
 
-use office_core::pptx::{self, ParsedPpt};
+use office_ppt::pptx::{self, ParsedPpt};
 use wasm_bindgen::prelude::*;
 
 /// 主线程持有的演示文稿句柄。
