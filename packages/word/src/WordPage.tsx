@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FileUpload } from "@tengxiaohyx/office-shared";
 import { sharedMeasurer } from "@tengxiaohyx/office-shared";
-import { loadDocx } from "@tengxiaohyx/office-word";
-import type { WordDocument } from "@tengxiaohyx/office-word";
+import { loadDocx } from "./wasm";
+import type { WordDocument } from "./model";
 import {
   layoutDoc,
   imageIdsIn,
@@ -10,6 +10,8 @@ import {
   type Layout,
   type WordMatch,
 } from "./wordLayout";
+import "@tengxiaohyx/office-shared/page.css";
+import "./word.css";
 
 type Status = "idle" | "loading" | "ready" | "error";
 
@@ -300,7 +302,7 @@ export function WordPage() {
           </span>
         )}
         {status === "ready" && (
-          <span className="ppt-zoom" data-testid="word-zoom">
+          <span className="word-zoom" data-testid="word-zoom">
             <button
               type="button"
               data-testid="word-zoom-out"
@@ -337,10 +339,10 @@ export function WordPage() {
       )}
 
       {status === "ready" && findOpen && (
-        <div className="sheet__find-bar" data-testid="word-find-bar">
+        <div className="word-find-bar" data-testid="word-find-bar">
           <input
             type="text"
-            className="sheet__find-input"
+            className="word-find-input"
             data-testid="word-find-input"
             placeholder="查找…"
             autoFocus
@@ -358,7 +360,7 @@ export function WordPage() {
               }
             }}
           />
-          <span className="sheet__find-count" data-testid="word-find-count">
+          <span className="word-find-count" data-testid="word-find-count">
             {findMatches.length > 0 ? `${findIdx + 1}/${findMatches.length}` : "无匹配"}
           </span>
           <button

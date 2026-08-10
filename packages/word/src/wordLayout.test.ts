@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { layoutDoc, imageIdsIn, findLineMatches } from "./wordLayout";
 import { TextMeasurer } from "@tengxiaohyx/office-shared";
-import type { WordModel, Paragraph, Run } from "@tengxiaohyx/office-word";
+import type { WordModel, Paragraph, Run } from "./model";
 
 /** 无 canvas 环境下,TextMeasurer 用字符数 × 8 兜底,布局也应产出合理结果。 */
 const measurer = new TextMeasurer();

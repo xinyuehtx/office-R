@@ -3,3 +3,4 @@
 // 组件(WordPage / 布局)在 Phase 5 迁入。当前先立数据层:模型类型与 wasm 加载器。
 export * from "./model";
 export { loadDocx } from "./wasm";
+export { WordPage } from "./WordPage";

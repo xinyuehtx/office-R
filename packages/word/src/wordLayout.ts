@@ -11,7 +11,7 @@
 
 import type { TextMeasurer } from "@tengxiaohyx/office-shared";
 import { FONT_FAMILY } from "@tengxiaohyx/office-shared";
-import type { Block, Paragraph, Run, WordModel } from "@tengxiaohyx/office-word";
+import type { Block, Paragraph, Run, WordModel } from "./model";
 
 /** 页面内边距与默认排版常量(CSS 像素)。 */
 export const PAGE_PADDING = 48;

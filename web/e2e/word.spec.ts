@@ -15,6 +15,13 @@ test.describe("Word 只读渲染", () => {
       .poll(() => canvasNonEmptyPixels(page, 'canvas[data-testid="word-canvas"]'))
       .toBeGreaterThan(1000);
 
+    // CSS 守卫:find-bar 与 zoom 的样式由 Excel/PPT 复制改名而来。拆包后 word 单独
+    // 跑会静默变丑而不报错(没有测试选这些 class)—— 断言 computed style 存在。
+    await page.keyboard.press("Control+f");
+    await expect(page.getByTestId("word-find-bar")).toHaveCSS("display", "flex");
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("word-zoom")).toHaveCSS("display", "flex");
+
     // 缩放控件:放大后百分比更新且仍有内容
     await page.getByTestId("word-zoom-in").click();
     await expect(page.getByTestId("word-zoom-reset")).toContainText("125%");
